@@ -28,7 +28,9 @@
 
 ## P2 — NAT / full-cone / IPv6
 
-- [ ] `dpd-einat` 绑定表与 UFS 合并
+- [x] P2.0 safe mode：NAT 上行不做 LAN→WAN 接管，回程仍加速
+      （ESXi `masq=1` 实测 32MB 下载 7.98s，`flow_hit` 增长）
+- [ ] P2.1 UFS+einat NAT 合并（前向/上传也加速）
 - [ ] 正反双向 UFS
 - [ ] 陌生入站 EIF
 - [ ] IPv6 双向（状态防火墙或 NAT66）
@@ -36,14 +38,15 @@
 
 ## P3 — 功能迁移
 
-- [ ] `dpd-acl` 规则/epoch
-- [ ] `dpd-qos`：off/cake/hybrid
-- [ ] `dpd-mwan`：WAN 选择/健康/失效
-- [ ] keep-settings 升级与旧 UCI alias
+- [x] `dpd-acl` meta + router-acl 保留 UCI
+- [x] `dpd-qos` meta + router-qos 保留 UCI
+- [x] `dpd-mwan` meta + ebpf_mwan 保留 UCI
+- [ ] keep-settings 升级与旧 UCI alias（meta 已兼容旧名）
 
 ## P4 — NAPI 与 10G
 
-- [ ] `dpd-napi`：netdev-genl per-NAPI 配置
+- [x] `dpd-napi` sysfs 版（budget/dev_weight/gro_flush/defer_irqs/RPS/XPS）
+- [ ] `dpd-napi` netdev-genl per-NAPI 配置
 - [ ] threaded NAPI / IRQ affinity
 - [ ] GRO/GSO/TSO A/B
 - [ ] qdisc 模式与门禁
