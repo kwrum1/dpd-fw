@@ -1,0 +1,25 @@
+# build outputs
+*.o
+*.ko
+*.so
+*.a
+*.ipk
+*.apk
+*.tar.gz
+*.img
+*.img.gz
+*.vmdk
+build/
+dist/
+target/
+__pycache__/
+*.pyc
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# generated docs (keep the source; the docx is committed on purpose)
+# docs/*.docx

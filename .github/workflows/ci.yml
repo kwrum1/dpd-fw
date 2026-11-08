@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: |
+          set -e
+          for f in $(git ls-files); do
+            case "$f" in
+              *.sh|*/files/90-*|*/files/91-*|*/files/92-*|*/files/93-*|*/files/95-*|*/files/98-*|*/files/99-*|*/files/dpd-*|*/files/*.init|*/files/router-*|*/files/ebpf-*|*/files/einat-*)
+                [ -f "$f" ] || continue
+                sh -n "$f"
+                ;;
+            esac
+          done
+      - name: Python syntax
+        run: |
+          set -e
+          for f in $(git ls-files '*.py'); do python3 -m py_compile "$f"; done
+      - name: Design doc present
+        run: test -s "docs/DPD-FW-选型与架构设计.docx"
+
+  bpf-syntax:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang/libbpf headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev
+      - name: BPF object (P0 best effort)
+        run: |
+          cd bpf/core
+          clang -target bpf -O2 -g -I src -I /usr/include -c src/dpd_fastpath.bpf.c -o /tmp/dpd_fastpath.bpf.o || true
+          ls -l /tmp/dpd_fastpath.bpf.o 2>/dev/null || true
