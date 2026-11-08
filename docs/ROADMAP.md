@@ -51,9 +51,10 @@
 
 ## P5 — 插件与 UI
 
-- [ ] `dpd-honk`（唯一代理插件）
-- [ ] `dpd-observe`（flow stats/gate）
-- [ ] `luci-app-dpd` 页面合并
+- [x] `dpd-honk`（唯一代理插件，控制面）
+- [x] `dpd-observe`（status/gate/plugins JSON + ubus）
+- [x] `luci-app-dpd` 页面（overview/honk/flows/napi）
+- [x] `dpd-napi` 脚本/包（sysfs 版；netdev-genl 版待 P4）
 - [ ] 升级/回退演练（脚本已加，待在镜像上跑）
 
 ## P6 — 可选

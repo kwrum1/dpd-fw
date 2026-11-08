@@ -6,13 +6,13 @@ path is tested. It does not change the datapath ABI.
 
 ## Definition of done
 
-- [ ] `dpd-honk` package: reports honk state, bumps the DPD epoch when the
+- [x] `dpd-honk` package: reports honk state, bumps the DPD epoch when the
       honk config changes, never starts/stops honk on its own.
-- [ ] `dpd-observe` package: writes `/var/run/dpd/observe.json` and exposes
+- [x] `dpd-observe` package: writes `/var/run/dpd/observe.json` and exposes
       `ubus dpd status` / `flows` / `plugins`.
-- [ ] `dpd-napi` package: applies the UCI NAPI/GRO/RPS values to sysfs and
+- [x] `dpd-napi` package: applies the UCI NAPI/GRO/RPS values to sysfs and
       publishes `/var/run/dpd/napi.json`.
-- [ ] `luci-app-dpd`: DPD menu, overview page, honk link, flows/gate cards.
+- [x] `luci-app-dpd`: DPD menu, overview page, honk link, flows/gate cards.
 - [ ] upgrade drill: keep-settings upgrade, packages reinstall, status/gate
       survived, rollback restores the previous package set.
 - [ ] local build: `dpd-fw` packages compile against 6.18 and the ESXi lab
