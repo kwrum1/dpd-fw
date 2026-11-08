@@ -39,6 +39,8 @@ jobs:
       - name: BPF object with L2/L3 sections
         run: |
           cd bpf/core
-          clang -target bpf -O2 -g -I src -I /usr/include -c src/dpd_fastpath.bpf.c -o /tmp/dpd_fastpath.bpf.o
+          multiarch=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
+          clang -target bpf -O2 -g -I src -I /usr/include -I "/usr/include/$multiarch" \
+            -c src/dpd_fastpath.bpf.c -o /tmp/dpd_fastpath.bpf.o
           llvm-objdump -h /tmp/dpd_fastpath.bpf.o | grep -q 'classifier/l2'
           llvm-objdump -h /tmp/dpd_fastpath.bpf.o | grep -q 'classifier/l3'
