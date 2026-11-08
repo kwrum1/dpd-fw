@@ -54,7 +54,7 @@
 - [ ] `dpd-honk`（唯一代理插件）
 - [ ] `dpd-observe`（flow stats/gate）
 - [ ] `luci-app-dpd` 页面合并
-- [ ] 升级/回退演练
+- [ ] 升级/回退演练（脚本已加，待在镜像上跑）
 
 ## P6 — 可选
 
