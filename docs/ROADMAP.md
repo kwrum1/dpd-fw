@@ -19,7 +19,7 @@
 
 - [ ] `dpd-flowd` 骨架：conntrack/honk/einat 事件
 - [ ] UFS key/value 定稿
-- [ ] L2/L3 双 BPF section，去掉每包 `dpd_iface` 查询
+- [x] L2/L3 双 BPF section，去掉每包 `dpd_iface` 查询
 - [ ] 配置移出热路径
 - [ ] `accel_after_pkts`（默认 32）
 - [ ] 命中路径只更新 2 个 per-CPU 计数
