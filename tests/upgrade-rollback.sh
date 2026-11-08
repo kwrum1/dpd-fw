@@ -37,7 +37,7 @@ echo "=== install ==="
 if command -v opkg >/dev/null 2>&1; then
 	for pkg in "$@"; do opkg install "$pkg" || fail "opkg install $pkg"; done
 elif command -v apk >/dev/null 2>&1; then
-	for pkg in "$@"; do apk add --allow-untrusted "$pkg" || fail "apk add $pkg"; done
+	for pkg in "$@"; do apk add --no-network --allow-untrusted "$pkg" || fail "apk add $pkg"; done
 else
 	fail "no package manager"
 fi
