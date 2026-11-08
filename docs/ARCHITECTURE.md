@@ -453,7 +453,56 @@ dpd-fw/
 
 ---
 
-## 13. 参考
+## 13. 实验室验证记录（2026-11-08）
+
+ESXi `10.1.18.124` 上的测试床：
+
+| 角色 | 配置 | 地址 |
+|---|---|---|
+| `dpd-test` | 4 vCPU / 4GB / vmxnet3 ×3，BIOS vmdk | LAN 192.168.10.1，WAN 198.18.0.1，mgmt 10.1.18.250 |
+| `ebpf-client2` | OpenWrt，2 vCPU / 2GB | 192.168.10.162 |
+| `ly-route-lab` | Debian，4 vCPU / 4GB | 198.18.0.2 |
+
+已确认：
+
+- P1 的 `classifier/l2` 版本可以加载，`tc filter` 显示
+  `dpd_fastpath.bpf.o:[classifier/l2] direct-action`；
+- 流表能学到正反双向条目，`flow_hit`/`redirect` 计数增长；
+- 慢路径小文件下载正常。
+
+发现的两个真实问题：
+
+1. **br-lan ingress 看不到网桥端口之间的转发帧**
+   - 只在 `br-lan` 上挂 tc 时，LAN→WAN 的计数不增长；
+   - 把同一个程序挂到 `eth0`（网桥端口）后，`flow_hit`/`redirect` 立即增长；
+   - 已在 `bpf/core/files/dpd-fastpath.sh` 修复：`dpd_attach_one` +
+     `dpd_attach_if` 自动遍历 `/sys/class/net/<master>/brif/*`，并对称 detach。
+
+2. **DPD 在 LAN ingress 接管会绕过 einat 的 NAT**
+   - 快速路径的流键是 **pre-NAT** 的 LAN 源地址；重定向到 WAN 后，
+     einat 的 egress SNAT 没有覆盖到该包，服务器看到的是 192.168.10.162，
+     不是 198.18.0.1；
+   - 小流量/首包（prime）能过，bulk TCP 在几秒后失败；
+   - 这与设计中的“NAT 只有一个归属：einat”并不矛盾，而是说明
+     **P1 的 L2 快路径不能独立接管需要 NAT 的上行流**；
+   - 结论：P2 的 UFS + einat NAT 合并是必需项，不是可选项。
+
+其他记录：
+
+- 该 ESXi 宿主对 EFI 固件启动失败，测试 VM 使用 BIOS vmdk；
+- 3 个 vmxnet3 + pvscsi 需要显式 `pciBridge4..7` 和槽位
+  （scsi0=16, ethernet0=192, ethernet1=224, ethernet2=256），
+  否则 `msg.pci.noslotavail`；
+- `ebpf-mwan` 的 4787 策略规则会在 table 4787 缺默认路由时让
+  `bpf_fib_lookup` 失败；单 WAN 测试先禁用 mwan 并清理规则。
+
+下一步：
+
+- P2：把 einat 的 full-cone 绑定结果写进 UFS，命中路径做 NAT 增量改写；
+- 在 P2 之前，先用“服务器静态回程路由 + 关闭 einat”的方式单独验证
+  L2 转发，避免 NAT 干扰定位。
+
+## 14. 参考
 
 - Qualcomm NSS/ECM: https://github.com/qosmio/nss-packages
 - MediaTek PPE: https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
