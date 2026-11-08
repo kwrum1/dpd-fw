@@ -502,7 +502,34 @@ ESXi `10.1.18.124` 上的测试床：
 - 在 P2 之前，先用“服务器静态回程路由 + 关闭 einat”的方式单独验证
   L2 转发，避免 NAT 干扰定位。
 
-## 14. 参考
+## 14. P5 交付与验证（2026-11-08）
+
+P5 的四个包已用本地 25.12.4 SDK 编译，并在 ESXi `dpd-test` 上安装：
+
+```
+dpd-honk-0.1.0-r1.apk          1892
+dpd-napi-0.1.0-r1.apk          1811
+dpd-observe-0.1.0-r1.apk       1443
+luci-app-dpd-0.1.0-r1.apk      3272
+```
+
+验证：
+
+- `apk info -e` 报告四个包均已安装；
+- `ubus call dpd status` 返回 `dpd.abi=15`、`gate.effective`；
+- `/var/run/dpd/observe.json`、`honk.json`、`napi.json` 均生成；
+- 升级演练：`PASS: abi=15 attached=true mode=observe`；
+- `luci-app-dpd` 的 menu/ACL/rpcd/4 个 JS 视图已安装，DPD 页面是插件页，
+  加速摘要仍只在 Vantage 首页健康行。
+
+P5 的边界（必须如实报告）：
+
+- P5 完成了插件/UI/状态文档和包级升级演练；
+- **P2 的 UFS+NAT 合并仍未完成**：LAN→WAN 的前向加速在 NAT 场景下仍会
+  绕过 einat 的 SNAT，bulk TCP 会失败；P5 的 UI 不掩盖这一点；
+- 全量固件镜像构建尚未在本轮本地完成，当前验证用的是云镜像 + 本地包。
+
+## 15. 参考
 
 - Qualcomm NSS/ECM: https://github.com/qosmio/nss-packages
 - MediaTek PPE: https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mediatek/mtk_ppe_offload.c

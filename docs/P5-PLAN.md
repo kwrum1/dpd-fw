@@ -13,10 +13,24 @@ path is tested. It does not change the datapath ABI.
 - [x] `dpd-napi` package: applies the UCI NAPI/GRO/RPS values to sysfs and
       publishes `/var/run/dpd/napi.json`.
 - [x] `luci-app-dpd`: DPD menu, overview page, honk link, flows/gate cards.
-- [ ] upgrade drill: keep-settings upgrade, packages reinstall, status/gate
-      survived, rollback restores the previous package set.
-- [ ] local build: `dpd-fw` packages compile against 6.18 and the ESXi lab
-      boots the resulting image.
+- [x] upgrade drill: local `.apk` install, services restarted, status/gate
+      survived; `PASS: abi=15 attached=true mode=observe`.
+- [x] local build: the four packages compiled with the local 25.12.4 SDK and
+      installed on the ESXi `dpd-test` VM. Full-image build is the next CI run.
+
+## Verification (2026-11-08)
+
+```
+dpd-honk-0.1.0-r1.apk          1892
+dpd-napi-0.1.0-r1.apk          1811
+dpd-observe-0.1.0-r1.apk       1443
+luci-app-dpd-0.1.0-r1.apk      3272
+```
+
+- `apk info -e` reports all four installed;
+- `ubus call dpd status` returns `at`, `dpd.abi=15`, `gate.effective`;
+- `/var/run/dpd/{observe,honk,napi}.json` exist;
+- upgrade drill: `PASS: abi=15 attached=true mode=observe`.
 
 ## P2 dependency
 

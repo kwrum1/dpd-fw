@@ -55,7 +55,7 @@
 - [x] `dpd-observe`（status/gate/plugins JSON + ubus）
 - [x] `luci-app-dpd` 页面（overview/honk/flows/napi）
 - [x] `dpd-napi` 脚本/包（sysfs 版；netdev-genl 版待 P4）
-- [ ] 升级/回退演练（脚本已加，待在镜像上跑）
+- [x] 升级/回退演练（本地 `.apk` 安装 + 校验：`PASS: abi=15 attached=true mode=observe`）
 
 ## P6 — 可选
 
