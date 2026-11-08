@@ -529,7 +529,47 @@ P5 的边界（必须如实报告）：
   绕过 einat 的 SNAT，bulk TCP 会失败；P5 的 UI 不掩盖这一点；
 - 全量固件镜像构建尚未在本轮本地完成，当前验证用的是云镜像 + 本地包。
 
-## 15. 参考
+## 15. P2.0 / P3 / P4 进展（2026-11-09）
+
+### P2.0 safe mode（已实现）
+
+LAN→WAN 的 FIB 出口如果带学到的 IPv4 nexthop（NAT 上行），DPD 不再接管前向；
+首包/前向交给 fw4/einat SNAT，回程在 einat 反 NAT 之后仍然学习并加速。
+
+ESXi `dpd-test` 验证（WAN 上 `masq=1`）：
+
+- 32 MB 下载：`7.98s` 完成，不再出现 bulk TCP 失败；
+- `flow_hit=39`、`redirect=39`，流表只有回程条目；
+- 这是“下载加速、上传慢路径”的安全模式，不是最终双向方案。
+
+### P2.1 的下一步（已定位可用的数据）
+
+einat 的 `map_binding` BTF/布局已实测：
+
+```
+map_binding_key   12B: ifindex, flags, l4proto, from_port, from_addr
+map_binding_value 28B: to_addr, to_port, flags, is_static, outbound_ref,
+                       ref, seq, ct_state_cached, ct_touch_ms
+map_ct_key        20B: ifindex, flags, l4proto, pad, external tuple
+map_ct_value      40B: origin tuple, flags, pad, state, seq, timer
+```
+
+`map_binding` 正是前向 SNAT 所需的“内网 (addr,port) -> 外部 (addr,port)”映射。
+P2.1 有两条实现路径：
+
+1. DPD 自己的 `dpd_nat` 镜像表，由 `dpd-einat` 从 einat map 同步，UFS 命中时
+   直接写回；不需要修改 einat 二进制。
+2. 自定义 loader 用 `bpf_map__reuse_fd` 复用 einat 的 map FD；少一次同步，
+   但要把 `tc` 加载改成 libbpf loader。
+
+### P3 / P4
+
+- P3：`dpd-acl`/`dpd-qos`/`dpd-mwan` meta 包已加入包集，底层仍是
+  `router-acl`/`router-qos`/`ebpf-mwan`，UCI 不变。
+- P4：`dpd-napi` sysfs 版已交付并写入 `napi.json`；per-NAPI netdev-genl、
+  threaded NAPI、IRQ affinity 仍在 P4.1。
+
+## 16. 参考
 
 - Qualcomm NSS/ECM: https://github.com/qosmio/nss-packages
 - MediaTek PPE: https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
