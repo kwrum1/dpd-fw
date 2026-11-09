@@ -75,7 +75,7 @@ jobs:
             dir=$(dirname "$src")
             out="/tmp/$(basename "$src" .c).o"
             echo "clang -target bpf: $src -> $out"
-            clang -target bpf -O2 -g \
+            clang -target bpf -O2 -g -DDPD_MODE_DEFAULT=1 \
               -I "$dir" -I /usr/include -I "/usr/include/$multiarch" \
               -c "$src" -o "$out"
           done < /tmp/bpf-sources

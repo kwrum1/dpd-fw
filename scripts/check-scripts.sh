@@ -56,11 +56,17 @@ failed=0
 while IFS= read -r f; do
 	[ -f "$f" ] || continue
 	total=$((total + 1))
-	if sh -n "$f" 2>"$err"; then
+	# bash-only scripts (honk/build-core.sh) cannot be parsed by `sh -n`.
+	first=$(head -n 1 "$f" 2>/dev/null || true)
+	case $first in
+	'#!/bin/bash'* | '#!/usr/bin/env bash'*) interp=bash ;;
+	*) interp=sh ;;
+	esac
+	if $interp -n "$f" 2>"$err"; then
 		:
 	else
 		failed=$((failed + 1))
-		printf 'FAIL: %s\n' "$f" >&2
+		printf 'FAIL: %s (%s -n)\n' "$f" "$interp" >&2
 		sed 's/^/  /' "$err" >&2
 	fi
 done <"$list"

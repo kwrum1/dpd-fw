@@ -105,23 +105,40 @@ jobs:
 
       - name: Build the packages
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cd sdk
-          make defconfig >/dev/null
+          make defconfig >/tmp/defconfig.log 2>&1 || { tail -40 /tmp/defconfig.log; exit 1; }
           # A fresh SDK has no libc/libgcc metadata: package-pack.mk checks each
           # package's DT_NEEDED against the provides files of its implicit deps,
           # finds nothing, and refuses to create the apk. Seed the two SONAMEs.
-          pkginfo=$(echo staging_dir/target-*/pkginfo)
-          mkdir -p "$pkginfo"
-          printf 'libc.so\nlibgcc_s.so.1\n' > "$pkginfo/libc.provides"
-          printf 'libgcc_s.so.1\n' > "$pkginfo/libgcc.provides"
+          target=$(ls -d staging_dir/target-* 2>/dev/null | head -1)
+          if [ -z "$target" ]; then
+            make -C package/dpdfwd TOPDIR="$PWD" BUILD_SUBDIR=package/dpdfwd \
+              BUILD_VARIANT= ALL_VARIANTS= prepare >/dev/null 2>&1 || true
+            target=$(ls -d staging_dir/target-* 2>/dev/null | head -1)
+          fi
+          echo "target dir: ${target:-none}"
+          mkdir -p "$target/pkginfo"
+          printf 'libc.so\nlibgcc_s.so.1\n' > "$target/pkginfo/libc.provides"
+          printf 'libgcc_s.so.1\n' > "$target/pkginfo/libgcc.provides"
+
+          fail=0
           for p in dpdfwd dpd-napi luci-app-ebpf router-dataplane; do
-            echo "== $p"
-            make -C "package/$p" TOPDIR="$PWD" \
+            echo "::group::$p"
+            if make -C "package/$p" TOPDIR="$PWD" \
               BUILD_SUBDIR="package/$p" BUILD_VARIANT= ALL_VARIANTS= \
               compile CONFIG_SIGN_EACH_PACKAGE= \
-              CLANG=clang BPF_DEPENDS= DPD_BPF_INCLUDES=-I/usr/include
+              CLANG=clang BPF_DEPENDS= DPD_BPF_INCLUDES=-I/usr/include \
+              > "/tmp/build-$p.log" 2>&1; then
+              echo "ok: $p"
+            else
+              echo "::error::package $p failed"
+              tail -80 "/tmp/build-$p.log"
+              fail=1
+            fi
+            echo "::endgroup::"
           done
+          exit "$fail"
 
       - name: Verify the apks
         run: |
