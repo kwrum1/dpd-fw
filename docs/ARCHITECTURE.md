@@ -657,12 +657,14 @@ ESXi 实测（2026-11-09，eth1 同时有 10.46.0.6/198.18.0.1）：
 - **ICMP 错误报文**（type 3/11，traceroute 依赖）没有做 inner-packet 的
   id/地址改写；目前只处理 echo request/reply。UDP traceroute 的端口部分
   可用，ICMP 错误回包仍走栈。
-- **fw4 accept 要自己给**：einat 停掉后它注入的 WAN→LAN 兜底 accept 也没了。
-  `nat_forward=dpd` 目前要求操作者显式加一条 fw4 规则；下一步应在包里
-  提供 nft include 并让 gate 检查它。
-- **binding 生命周期**：`dpd_nat` 是 LRU，极端压力下一条活跃 binding 可能
-  被挤掉，之后同一 5 元组会分到新端口（上游会拒绝）。端口表只按 TTL 回收，
-  没有 conntrack destroy 驱动的主动回收；`dpdfwd` 的 CT 事件可以接进来。
+- **fw4 兜底 accept 不需要**：实测把 einat 完全停止（连它的 fw4 规则一起
+  消失）后，DPD NAT 模式下 ping 3/3、TCP 下载正常。回程在 pref 50 被 DNAT
+  回原始 tuple，conntrack 能把它认成原连接的回复，fw4 的
+  `ct state established` 就放行；不需要 einat 那条 blanket accept。
+- **binding 生命周期**：CT destroy 时 `dpdctl delete -f` 会同时释放
+  `dpd_nat`/`dpd_nat_rev`（实测 `released 1 nat binding(s)`），端口立即
+  回池；剩余风险只有 LRU 在极端并发下挤掉**活跃** binding（无主动回收），
+  表现是同一 5 元组被分到新端口、上游拒绝。
 - 多 WAN 时端口归属按 `(ext_addr, port, proto)` 区分，同一个端口号可以在
   两个 WAN 地址上同时使用，这是符合 NAT 语义的；但端口池本身是全局的。
 

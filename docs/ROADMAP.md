@@ -8,15 +8,24 @@
 | P1 | 11/12 | 92% | PPPoE A/B |
 | P2 | 4/7 | 57% | EIF、IPv6、`bpf_ct_*`；SNAT 的 ICMP/回收边界 |
 | P3 | 5/5 | 100% | ACL/QoS 分类器接入 dpd_class（机制已就绪） |
-| P4 | 4/8 | 50% | threaded/IRQ A/B、GRO/GSO A/B、qdisc 门禁、10G/64B 门禁 |
+| P4 | 4/8 | 50%（门禁取消） | 性能 A/B 与 10G/64B 门禁不阻塞 v1 |
 | P5 | 5/5 | 100% | — |
 | P6 | 0/2 | 0% | 可选 |
 | P7 | 1/6 | 17% | 仅调研，实现已挂起 |
 
 - 按 P0–P5 复选框加权：**约 78%**；
-- 按设计文档的“能力”口径：**约 60–65%**（UFS 全量字段、Flow Manager 状态机、
-  插件 ABI、full-cone/IPv6、性能门禁仍未完成）；
-- 性能验证：**约 10–15%**（只做了 payload 扫描，没有 64B PPS/10G 门禁）。
+- 按设计文档的“能力”口径：**约 65%**（ICMP 错误报文、NAT66、`bpf_ct_*` 未做）；
+- 性能验证：**v1 不再作为验收条件**（2026-11-09 决策取消）。
+
+## v1 闭环决定（2026-11-09）
+
+- **性能门禁取消**：64B PPS、1G/2.5G/10G 线速、IMIX 不再阻塞 v1；
+- **闭环 = 真机 N5000 上的功能验收**：矩阵与判据见
+  `docs/ACCEPTANCE-N5000.md`；
+- 之后进入**交付运维阶段**：`docs/OPERATIONS.md`；
+- 真机验收前要完成的功能项：ICMP 错误报文（traceroute）、feed 接入；
+  EIF/IPv6 在真机上验证。
+- v1 明确不做：NAT66、`bpf_ct_*`、PPE/NSS 实现、GPU/NPU。
 
 ## P0 — 仓库与基线
 
@@ -84,6 +93,11 @@
         pref 100 时 ICMP 回包被策略层丢掉（0/3），50 时 3/3
       - 边界：ICMP 错误报文未做、fw4 accept 需操作者提供、LRU 挤掉活跃
         binding 无主动回收
+- [x] NAT binding 主动回收：`dpdctl delete -f` 在删 UFS 的同时释放
+      `dpd_nat`/`dpd_nat_rev`（实测 `released 1 nat binding(s)`）；
+      dpdfwd 的 CT destroy 批次自动生效
+- [x] fw4 兜底 accept **不需要**：einat 完全停止后，DPD NAT 模式下
+      ping 3/3、TCP 下载正常（回程 DNAT 后 conntrack 匹配原始 tuple）
 - [ ] 陌生入站 EIF（einat 已具备，需双 peer 验证）
 - [ ] IPv6 双向（状态防火墙或 NAT66）
 - [ ] `bpf_ct_*` 可选路径
