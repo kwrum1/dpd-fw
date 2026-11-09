@@ -148,3 +148,24 @@ DNAT 在 DPD 之前完成，所以能到 99%。
 - 切到 DPD 自有 NAT（`nat_forward=dpd` / `nat_ingress=dpd`），由 DPD 自己
   在 pref-50 做 DNAT，不再依赖 einat 的 hook 顺序（该模式已实现并在台架
   验证过）。
+
+## 10. DPD 自有 NAT 与 einat 的 A/B（2026-11-09 晚）
+
+方法：NAS → 清华镜像，`curl -4 --resolve`，20 秒下载；前后读
+`/proc/stat` 与 `dpdctl status`。两种模式交替各跑两次。
+
+| 模式 | 吞吐 | 4 核总 CPU | v4 命中 |
+|---|---|---|---|
+| einat（基线 1） | 350 Mbps | ~2.4% | 99.94% |
+| einat（基线 2） | 328 Mbps | ~2.6% | ~99.9% |
+| `nat_forward=dpd` + 加速 | 一次 0.36 MB 后停滞；另一次 490 MB 但命中 0 | — | **0%** |
+| `nat_forward=dpd` + observe（不加速） | 310 Mbps | — | 不适用 |
+
+结论：**DPD NAT 没有性能收益**。更严重的是它和加速一起工作时回程方向
+学不到流：`bytes_hit_v4` 完全不增长，流表里出现 `egress=eth0` 的
+observe 条目，一次下载在 360 KB 处停滞；关掉加速（observe）反而能跑到
+310 Mbps。说明 pref-50 DNAT + egress SNAT 与 UFS 学习路径之间有交互问题，
+需要单独排查，不能作为 einat 的平替直接上线。
+
+已回滚：`nat_forward=einat`、`nat_ingress=einat`，einat 重启，gate 恢复
+`einat: true`，pref-50 与 DPD egress 钩子消失；复测 346 Mbps、99.3% 命中。
