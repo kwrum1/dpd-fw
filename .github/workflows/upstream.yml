@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   einat:
-    name: einat patches (${{ env.EINAT_COMMIT }})
+    name: einat patches
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -44,7 +44,7 @@ jobs:
           git -C src diff --stat
 
   honk-core:
-    name: honk core patch (${{ env.CORE_COMMIT }})
+    name: honk core patch
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
