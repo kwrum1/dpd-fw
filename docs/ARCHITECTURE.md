@@ -628,6 +628,20 @@ ESXi（ABI 17）验证：
 cookie 映射）、UDP 自适应的真机/双 peer 验证、把 `accel_after`/TTL 由
 `dpdfwd` 动态决策（现在由 UCI 静态下发）。
 
+### P1.1 UFS v2 + 策略缓存（ABI 18，已实现）
+
+- `dpd_flow_val` 增加 `state/action/skb_priority/ct_cookie/nat_flags/dscp/
+  packets/bytes`；显式记录 `OBSERVE -> BIND`，FIN/RST 置 `FIN` 后删除。
+- 新增 `dpd_class` 策略缓存：用户态按 5-tuple 写
+  `forward/proxy/block/local + skb_priority`，学习时复制进 UFS，命中路径
+  不再查表。端口 0 与 ifindex 0 是通配（8 种组合，学习时最多 8 次查表）。
+- `dpdctl class add|del|list|flush`、`set counters/class`；
+  `dpdctl flows` 显示 state/action/priority/dscp/pkt/bytes。
+- 实测（ABI 18）：eth1 回程 block 规则令 wget 超时（FAIL）；`class flush`
+  后恢复 OK；命中路径的 action 门禁生效。
+- 仍归 einat/栈所有的：NAT 翻译结果（UFS 不缓存，P2.2）、按流定向失效
+  （ct cookie 映射）、ACL/QoS 的真实分类器（`dpd_class` 已提供机制）。
+
 ### P3 / P4
 
 - P3：`dpd-acl`/`dpd-qos`/`dpd-mwan` meta 包已加入包集，底层仍是
