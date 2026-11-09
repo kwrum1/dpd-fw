@@ -111,6 +111,38 @@ after : link=15 link_port=7  epoch_bumps=7
 现场 `local table 10/128`，`dpdctl local list` 能看到 WAN/LAN/ULA/link-local
 全部地址。代价是转发 miss 多一次小 hash 查表；本地流量不再产生 `fib_fail`。
 
+### E. NAT 闸门 + v4 游戏流
+
+决策：**einat 继续作为唯一 NAT 拥有者**；DPD 只加速 forward/reverse 绑定一致的流。
+
+- 学习路径新增一致性检查：用 `dpd_nat` 的 `to_addr/to_port` 反查
+  `dpd_nat_rev`，反向条目必须指回本流的内网 tuple；不一致（绑定被回收/
+  覆盖）就不学习，`nat_gone++`。
+- 现场发现游戏流 `10.10.10.152:2917 -> 47.112.198.234:21117` 的 einat
+  绑定是 `29812`，而 reverse `29812` 指向 `1038`（旧绑定被覆盖）——长命流
+  超出了 NAT 绑定的生命周期。
+- 处理：安装 `conntrack`，`conntrack -D -p tcp --sport 2917 --dport 21117`
+  删除旧 conntrack；客户端重连后新流 `...:11012` 在 `pppoe-wan` 上
+  `state=bind`（pkt 982、571 KB）**已被 DPD 加速**。
+- 结论：v4 游戏流不是 DPD 代码 bug，是 stale NAT 绑定；回收 flow 即可，
+  代码侧用一致性闸门防止旧绑定被错误加速。
+
+### F. IRQ 亲和 + busy-poll
+
+- `dpd-napi-irq` 新增 `--spread`：多 CPU 列表时每个 IRQ 轮转分配一个 CPU；
+  `dpd-napi` 新增 `irq_spread`（默认 1）、`busy_poll`、`busy_read`。
+- 现场 `irq_cpus=0-3`：eth0 IRQ 137–140 → 0/1/2/3，eth3 152–155 → 0/1/2/3。
+- A/B（10s v4 下载，两轮）：
+
+| 模式 | 吞吐 | CPU/MB |
+|---|---|---|
+| spread | 506 / 596 Mbps | 2.47 / 2.85 ms |
+| full mask | 534 / 582 Mbps | 2.77 / 2.94 ms |
+
+吞吐在链路噪声内；spread 的每 MB CPU 约低 7%，保留 spread。
+- `busy_poll`/`busy_read` 默认 0：只影响设置了 `SO_BUSY_POLL` 的 socket，
+  转发路径不用；没有可测收益，保持关闭。
+
 ### 未做
 
 - v4 游戏流/NAT 闸门（需要 NAT 归属决策，见 `RESEARCH-PPE-DUAL.md`）；
