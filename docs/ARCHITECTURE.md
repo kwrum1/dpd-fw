@@ -601,6 +601,56 @@ DPD 作为 bridge port 也 attach 到 `vbr`，路径与真实 LAN 客户端一�
 通过 procd 注入规则关掉 masq，gate 也只在 einat 确认挂在上行时才置
 `nat_offload`，所以这是误配置而非常态。
 
+### P2.3 前向 SNAT + 端口分配由 DPD 完成（ABI 20，实验性）
+
+`nat_forward=dpd` 时，前向写包不再经过 einat：
+
+- **挂载点**：新增 `classifier/egress` 程序，只挂在上行的 **egress** 钩子。
+  这是路由和 netfilter 之后、和 einat 的 TCX egress 完全相同的位置，所以
+  “netfilter 看到哪些包”不变。不能改在 ingress 做：P2.1 实测过，ingress
+  改写后 einat egress 会把包再 NAT 一次（双 NAT，服务器丢弃所有 ACK）。
+- **分配**：miss 时用 5 元组哈希在 `[nat_port_min, nat_port_max]`
+  （默认 20000–29999）里探测 8 个候选；用 `dpd_nat_rev` 本身做端口归属表，
+  `BPF_NOEXIST` 插入反向条目即“抢到”该端口，两个 CPU 不会同时赢。
+  反向条目带 CLOCK_MONOTONIC 毫秒时间戳，超过 TCP TTL 后视为可回收；
+  命中时最多每分钟刷新一次时间戳。
+- **外部地址**：分配时对目的地址做一次
+  `bpf_fib_lookup(..., BPF_FIB_LOOKUP_OUTPUT | BPF_FIB_LOOKUP_SRC)`，
+  取路由的首选源地址。多地址上行（实验箱 eth1 同时有 10.46.0.6 和
+  198.18.0.1）只有这样才对；`dpdctl nat_addr` 教进去的 `addr4` 只是
+  兜底和“这是一条 NAT 上行”的开关。
+- **写包**：命中或刚分配都把 saddr/sport 改成 `(ext, port)`，增量更新
+  IP/L4 校验和；UDP 校验和为 0 时跳过 L4 更新。回程仍由 ABI 19 的
+  `dpd_nat_rev` DNAT 完成 —— 两个方向各一次查表。
+- **安全阀**：`nat_forward=dpd` 且 bpftool 确认任一上行还挂着 einat 时，
+  gate 直接降级到 observe，egress 程序也不挂载（宁可不动，也不能双 NAT）。
+  默认 `nat_forward=einat` 时新程序完全不挂。
+- **与 fw4 masquerade 共存**：masq 在 POSTROUTING 先改包，我们的 egress
+  看到 `saddr == ext` 就直接放行，不会二次改端口。
+
+ESXi 实测（2026-11-09，eth1 同时有 10.46.0.6/198.18.0.1）：
+
+| 场景 | 结果 |
+|---|---|
+| 1MB 下载（einat ingress/egress 都 detach） | OK；`nat_alloc=1`、`nat_snat=117`、`nat_dnat=241` |
+| 绑定内容 | `192.168.10.200:35744 -> 198.18.0.1:25626`（端口在范围内） |
+| 32MB 下载 | 33554432 字节完整 |
+| 两条并发流 | 各自分到 23312 / 22924，表里 4 条 binding |
+| 恢复 `nat_forward=einat` + einat 重新挂载 | 下载 OK，`nat_snat/nat_dnat/nat_alloc` 全为 0 |
+
+还没做（能力边界要写清楚）：
+
+- **只支持 TCP/UDP**：ICMP（含 ping、traceroute）不分端口，继续走栈；
+  einat 停掉时这类流没有 NAT。需要单独设计 ICMP id 映射。
+- **fw4 accept 要自己给**：einat 停掉后它注入的 WAN→LAN 兜底 accept 也没了。
+  `nat_forward=dpd` 目前要求操作者显式加一条 fw4 规则；下一步应在包里
+  提供 nft include 并让 gate 检查它。
+- **binding 生命周期**：`dpd_nat` 是 LRU，极端压力下一条活跃 binding 可能
+  被挤掉，之后同一 5 元组会分到新端口（上游会拒绝）。端口表只按 TTL 回收，
+  没有 conntrack destroy 驱动的主动回收；`dpdfwd` 的 CT 事件可以接进来。
+- 多 WAN 时端口归属按 `(ext_addr, port, proto)` 区分，同一个端口号可以在
+  两个 WAN 地址上同时使用，这是符合 NAT 语义的；但端口池本身是全局的。
+
 ### P2.2 回程 DNAT 由 DPD 完成（ABI 19，可选）
 
 - `dpd-einat-sync` 除正向 binding 外，还把 einat 的**反向 binding**
@@ -612,8 +662,7 @@ DPD 作为 bridge port 也 attach 到 `vbr`，路径与真实 LAN 客户端一�
 - 只有把 einat 的 **ingress link** detach 之后才生效（egress 继续负责
   前向 SNAT 和端口分配）。ESXi 实测：detach ingress 后 1MB 下载 OK，
   `nat_dnat=332`；恢复 einat 后 `nat_dnat=0`、下载正常。
-- 这是“回程一次查表”的半步：前向 SNAT 仍由 einat egress 完成，
-  完整的一次查表需要 DPD 自己拥有 SNAT/端口分配（P2.3）。
+- 这是“回程一次查表”的半步；前向 SNAT/端口分配由 P2.3（ABI 20）补齐。
 
 ### P1 Flow Manager（ABI 17，已实现 MVP）
 
@@ -628,6 +677,13 @@ DPD 作为 bridge port 也 attach 到 `vbr`，路径与真实 LAN 客户端一�
 - **`dpdfwd`（新包）**：订阅 rtnetlink 的 link/addr/route/neigh 事件，300ms
   去抖后只调用一次 `dpdctl bump`；同时订阅 conntrack new/update/destroy 做
   计数，输出 `/var/run/dpd/flowd.json`。数据面不依赖它，daemon 崩溃不影响转发。
+- **声明式分类**：`/etc/dpd/class.conf` 每行一个 5 元组 + 动作
+  （`forward/proxy/block/local` + 可选 skb priority），`dpdfwd` 每 5 秒看
+  mtime，变化时 `dpdctl class flush` 后逐条 `class add`；计数发布到
+  `flowd.json` 的 `class_rules/class_bad/class_applied_at/class_error`。
+  规则在 UFS 学习时复制进条目，改规则后要 `dpdctl bump`（或定向删流）才对
+  已学流生效。ESXi 实测：`block` 规则使 `flow_block` +76、下载被拒；
+  清空文件后自动 flush、流量恢复。
 
 ESXi（ABI 17）验证：
 

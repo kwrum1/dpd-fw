@@ -5,16 +5,16 @@
 | 阶段 | 复选框 | 完成度 | 主要缺口 |
 |---|---|---|---|
 | P0 | 12/13 | 92% | feed 接入 |
-| P1 | 10/12 | 83% | PPPoE A/B、Flow Manager 分类决策 |
-| P2 | 3/7 | 43% | EIF、IPv6、`bpf_ct_*`、前向 SNAT 归 DPD |
+| P1 | 11/12 | 92% | PPPoE A/B |
+| P2 | 4/7 | 57% | EIF、IPv6、`bpf_ct_*`；SNAT 的 ICMP/回收边界 |
 | P3 | 5/5 | 100% | ACL/QoS 分类器接入 dpd_class（机制已就绪） |
 | P4 | 4/8 | 50% | threaded/IRQ A/B、GRO/GSO A/B、qdisc 门禁、10G/64B 门禁 |
 | P5 | 5/5 | 100% | — |
 | P6 | 0/2 | 0% | 可选 |
 | P7 | 1/6 | 17% | 仅调研，实现已挂起 |
 
-- 按 P0–P5 复选框加权：**约 74%**；
-- 按设计文档的“能力”口径：**约 55–60%**（UFS 全量字段、Flow Manager 状态机、
+- 按 P0–P5 复选框加权：**约 78%**；
+- 按设计文档的“能力”口径：**约 60–65%**（UFS 全量字段、Flow Manager 状态机、
   插件 ABI、full-cone/IPv6、性能门禁仍未完成）；
 - 性能验证：**约 10–15%**（只做了 payload 扫描，没有 64B PPS/10G 门禁）。
 
@@ -45,6 +45,10 @@
       packets/bytes；显式 OBSERVE→BIND 状态机
 - [x] `dpd_class` 策略缓存 + `dpdctl class`（端口 0/ifindex 0 通配；
       实测 eth1 block 生效）
+- [x] `dpdfwd` 声明式分类策略：`/etc/dpd/class.conf`（5 元组 + 动作），
+      mtime 变化时 flush + 逐条 `dpdctl class add`，结果进 `flowd.json`
+      （`class_rules/class_bad/class_applied_at/class_error`）；
+      实测 block 规则生效（`flow_block` +76，清空文件后流量恢复）
 - [x] L2/L3 双 BPF section，去掉每包 `dpd_iface` 查询
 - [x] 网桥端口自动 attach/detach
 - [x] 配置移出热路径（per-CPU cfg 块，一次查表）
@@ -66,7 +70,16 @@
 - [x] P2.2 回程 DNAT 由 DPD 完成（ABI 19，`nat_ingress=dpd`，
       `dpd_nat_rev` 从 einat 反向 binding 镜像；detach einat ingress 后
       1MB 下载 OK、`nat_dnat=332`；默认与 einat ingress 共存安全）
-- [ ] P2.3 前向 SNAT/端口分配归 DPD（完整“一次查表”）
+- [x] P2.3 前向 SNAT/端口分配归 DPD（ABI 20，`nat_forward=dpd`）
+      - `classifier/egress` 挂在上行 egress（路由/netfilter 之后，和 einat
+        TCX egress 同一位置），哈希+8 次探测分配 20000–29999；
+        `dpd_nat_rev` 兼作端口归属表，`BPF_NOEXIST` 抢占，TTL 回收
+      - 外部地址用 `bpf_fib_lookup(BPF_FIB_LOOKUP_OUTPUT|SRC)` 按路由取，
+        多地址上行也正确；`dpdctl nat_addr` 的 addr4 只作兜底/开关
+      - 实测：1MB 下载 OK（`nat_alloc=1/snat=117/dnat=241`）、32MB 完整、
+        两条并发流分到不同端口；恢复 einat 后三个计数均为 0
+      - 边界：ICMP 未做、fw4 accept 需操作者提供、LRU 挤掉活跃 binding
+        无主动回收
 - [ ] 陌生入站 EIF（einat 已具备，需双 peer 验证）
 - [ ] IPv6 双向（状态防火墙或 NAT66）
 - [ ] `bpf_ct_*` 可选路径
