@@ -622,6 +622,17 @@ DPD 作为 bridge port 也 attach 到 `vbr`，路径与真实 LAN 客户端一�
 - **写包**：命中或刚分配都把 saddr/sport 改成 `(ext, port)`，增量更新
   IP/L4 校验和；UDP 校验和为 0 时跳过 L4 更新。回程仍由 ABI 19 的
   `dpd_nat_rev` DNAT 完成 —— 两个方向各一次查表。
+- **ICMP**：echo 的 16 位 id 当作“端口”复用同一套分配/反向表；SNAT 改
+  saddr + id（IP 和 ICMP 校验和分别更新，ICMP 校验和不含伪首部），DNAT
+  还原 daddr + id。ICMP **不做快路径**（UFS key 没有端口，同一主机的所有
+  id 会撞成一条），全部走栈；这样回程 DNAT 后与 conntrack 原始 tuple
+  完全一致，反而比 TCP/UDP 更容易被判为 established。
+- **回程 DNAT 的挂载点在 pref 50，不在主程序（pref 100）里**：
+  router-acl 占 90；DNAT 之前回包的目的地址还是路由器自己，策略层会把它
+  当“WAN→本机”处理（实测 ICMP 回包在 pref 100 时被 pref 90 丢掉，ping
+  0/3；同一程序挂到 pref 50 后 3/3）。所以单独出一个
+  `classifier/nat`（DNAT-only、永远 `TC_ACT_UNSPEC`），在主程序之前把
+  tuple 还原；主程序里的 DNAT 块保留作兜底。
 - **安全阀**：`nat_forward=dpd` 且 bpftool 确认任一上行还挂着 einat 时，
   gate 直接降级到 observe，egress 程序也不挂载（宁可不动，也不能双 NAT）。
   默认 `nat_forward=einat` 时新程序完全不挂。
@@ -637,11 +648,15 @@ ESXi 实测（2026-11-09，eth1 同时有 10.46.0.6/198.18.0.1）：
 | 32MB 下载 | 33554432 字节完整 |
 | 两条并发流 | 各自分到 23312 / 22924，表里 4 条 binding |
 | 恢复 `nat_forward=einat` + einat 重新挂载 | 下载 OK，`nat_snat/nat_dnat/nat_alloc` 全为 0 |
+| ICMP ping（pref 50 DNAT 阶段） | 3/3，`nat_snat=3`、`nat_dnat=3` |
+| 重构后 1MB / 32MB 下载 | OK；1MB `nat_snat=96/nat_dnat=144`，32MB 33554432 字节完整 |
+| 默认模式 | pref 50 与 egress 钩子都不存在，ping/下载正常 |
 
 还没做（能力边界要写清楚）：
 
-- **只支持 TCP/UDP**：ICMP（含 ping、traceroute）不分端口，继续走栈；
-  einat 停掉时这类流没有 NAT。需要单独设计 ICMP id 映射。
+- **ICMP 错误报文**（type 3/11，traceroute 依赖）没有做 inner-packet 的
+  id/地址改写；目前只处理 echo request/reply。UDP traceroute 的端口部分
+  可用，ICMP 错误回包仍走栈。
 - **fw4 accept 要自己给**：einat 停掉后它注入的 WAN→LAN 兜底 accept 也没了。
   `nat_forward=dpd` 目前要求操作者显式加一条 fw4 规则；下一步应在包里
   提供 nft include 并让 gate 检查它。

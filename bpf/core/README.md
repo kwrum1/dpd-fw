@@ -510,8 +510,10 @@ BPF map（全部 `LIBBPF_PIN_BY_NAME`，ABI 版本 `dpd_common.h` 的
 | `dpd_nat` | LRU_HASH | 内网 tuple → 外部 binding（P2.1/P2.3） |
 | `dpd_nat_rev` | LRU_HASH | 外部 tuple → 内网 tuple；兼端口归属表（P2.2/P2.3） |
 
-程序 section：`classifier/l2`、`classifier/l3`（ingress）和
-`classifier/egress`（ABI 20，仅 `nat_forward=dpd` 时挂在上行 egress）。
+程序 section：`classifier/l2`、`classifier/l3`（ingress）、
+`classifier/egress`（ABI 20，仅 `nat_forward=dpd` 时挂在上行 egress）和
+`classifier/nat`（ABI 20，仅 `nat_ingress=dpd` 时挂在上行 ingress 的
+pref 50，早于 router-acl 的 90，只做回程 DNAT 并永远返回 UNSPEC）。
 
 ### 为什么不用 `CompileBPF`
 

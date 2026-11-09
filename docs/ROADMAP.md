@@ -78,8 +78,12 @@
         多地址上行也正确；`dpdctl nat_addr` 的 addr4 只作兜底/开关
       - 实测：1MB 下载 OK（`nat_alloc=1/snat=117/dnat=241`）、32MB 完整、
         两条并发流分到不同端口；恢复 einat 后三个计数均为 0
-      - 边界：ICMP 未做、fw4 accept 需操作者提供、LRU 挤掉活跃 binding
-        无主动回收
+      - ICMP echo：id 当端口复用同一套分配/反向表，saddr+id 一起改写；
+        ping 实测 3/3（`nat_snat=3/nat_dnat=3`）
+      - 回程 DNAT 单独挂在 pref 50（`classifier/nat`，早于 router-acl 90）：
+        pref 100 时 ICMP 回包被策略层丢掉（0/3），50 时 3/3
+      - 边界：ICMP 错误报文未做、fw4 accept 需操作者提供、LRU 挤掉活跃
+        binding 无主动回收
 - [ ] 陌生入站 EIF（einat 已具备，需双 peer 验证）
 - [ ] IPv6 双向（状态防火墙或 NAT66）
 - [ ] `bpf_ct_*` 可选路径
