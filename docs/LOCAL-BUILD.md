@@ -112,3 +112,20 @@ VM 配置不变。
 - `dpd-napi` 启用后 `napi.json` `netdev_genl=true`，`dpd-napi-netdev list eth1`
   返回 NAPI 527/528；
 - LuCI 四个页面（overview/honk/flows/napi）和菜单 JSON 都在。
+
+### 包长/吞吐（netns 客户端，非门禁）
+
+`tests/bench/results-2026-11-09-esxi.csv`：
+
+| 下载 payload | 时间 | 约 Mbps |
+|---|---|---|
+| 64 KiB | 0.05s | 10.5 |
+| 256 KiB | 0.05s | 41.9 |
+| 1 MiB | 0.06s | 139.8 |
+| 4 MiB | 0.13s | 258.1 |
+| 16 MiB | 0.43s | 312.1 |
+| 32 MiB | 0.72s | 372.8 |
+
+小包以建连/prime 为主（`accel_after=32`，短流按设计不进快路径）；32MB 上传
+字节数精确（16777216 / 33554432，peer 198.18.0.1:26631/29397），未单独计时。
+该数字受 ESXi 虚链路和 ly-route 的 HTTP 服务限制，不是 1G/10G 门禁数据。

@@ -1,0 +1,9 @@
+scenario,payload_bytes,seconds,mbps,notes
+tcp-download,65536,0.05,10.5,netns client -> 198.18.0.2; accel_after=32; startup dominated
+tcp-download,262144,0.05,41.9,netns client
+tcp-download,1048576,0.06,139.8,netns client
+tcp-download,4194304,0.13,258.1,netns client
+tcp-download,16777216,0.43,312.1,netns client
+tcp-download,33554432,0.72,372.8,netns client
+tcp-upload,16777216,,,bytes=16777216 peer=198.18.0.1:26631 (not timed)
+tcp-upload,33554432,,,bytes=33554432 peer=198.18.0.1:29397 (not timed)
