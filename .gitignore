@@ -12,6 +12,7 @@
 build/
 dist/
 target/
+openwrt/feed/index/
 __pycache__/
 *.pyc
 

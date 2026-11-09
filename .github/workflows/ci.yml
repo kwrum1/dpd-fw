@@ -5,42 +5,120 @@ on:
   pull_request:
   workflow_dispatch:
 
-jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Shell syntax
-        run: |
-          set -e
-          for f in $(git ls-files); do
-            case "$f" in
-              *.sh|*/files/90-*|*/files/91-*|*/files/92-*|*/files/93-*|*/files/95-*|*/files/98-*|*/files/99-*|*/files/dpd-*|*/files/*.init|*/files/router-*|*/files/ebpf-*|*/files/einat-*)
-                [ -f "$f" ] || continue
-                sh -n "$f"
-                ;;
-            esac
-          done
-      - name: Python syntax
-        run: |
-          set -e
-          for f in $(git ls-files '*.py'); do python3 -m py_compile "$f"; done
-      - name: Design doc present
-        run: test -s "docs/DPD-FW-选型与架构设计.docx"
+permissions:
+  contents: read
 
-  bpf-build:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    name: shell
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install clang/libbpf headers
+
+      - name: Install shellcheck
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev
-      - name: BPF object with L2/L3 sections
+          sudo apt-get install -y shellcheck
+
+      - name: sh -n on every tracked shell script
+        run: sh scripts/check-scripts.sh
+
+      - name: shellcheck -S warning
         run: |
-          cd bpf/core
+          set -eu
+          # The tree is OpenWrt shell, i.e. busybox ash plus /etc/rc.common,
+          # not portable POSIX sh. Six checks cannot be satisfied by design
+          # and are excluded:
+          #   SC2034  variables consumed by another script or by rc.common
+          #           (STOP=, USE_PROCD=, constants of sourced libraries)
+          #   SC2096  the init-script shebang "#!/bin/sh /etc/rc.common"
+          #   SC2120  helpers take optional args and are called both with and
+          #           without them from other sourced files
+          #   SC2155  "local x=$(...)" is the ash idiom used in ebpf-mwan
+          #   SC2218  functions are defined for runtime dispatch (no file-scope
+          #           calls), so forward references are normal
+          #   SC3043  `local` itself (an ash extension, not POSIX)
+          # Everything else at warning severity must be clean.
+          exclude='SC2034,SC2096,SC2120,SC2155,SC2218,SC3043'
+          list=$(mktemp)
+          trap 'rm -f "$list"' EXIT HUP INT TERM
+          git ls-files '*.sh' >>"$list"
+          git ls-files | while IFS= read -r f; do
+            case $f in
+              *.sh) continue ;;
+            esac
+            [ -f "$f" ] || continue
+            first=$(head -n 1 "$f" 2>/dev/null || true)
+            case $first in
+              '#!/bin/sh'*|'#!/usr/bin/env sh'*) printf '%s\n' "$f" >>"$list" ;;
+            esac
+          done
+          LC_ALL=C sort -u -o "$list" "$list"
+          count=$(wc -l <"$list" | tr -d ' ')
+          echo "shellcheck $(shellcheck --version | sed -n 's/^version: //p') on $count files"
+          tr '\n' '\0' <"$list" | xargs -0 -r shellcheck --severity=warning --exclude="$exclude"
+
+  bpf:
+    name: bpf
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang, llvm and headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm gcc libbpf-dev linux-libc-dev
+
+      - name: Compile every bpf/**/*.bpf.c for the BPF target
+        run: |
+          set -eu
           multiarch=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
-          clang -target bpf -O2 -g -I src -I /usr/include -I "/usr/include/$multiarch" \
-            -c src/dpd_fastpath.bpf.c -o /tmp/dpd_fastpath.bpf.o
-          llvm-objdump -h /tmp/dpd_fastpath.bpf.o | grep -q 'classifier/l2'
-          llvm-objdump -h /tmp/dpd_fastpath.bpf.o | grep -q 'classifier/l3'
+          git ls-files 'bpf/**/*.bpf.c' > /tmp/bpf-sources
+          test -s /tmp/bpf-sources
+          while IFS= read -r src; do
+            dir=$(dirname "$src")
+            out="/tmp/$(basename "$src" .c).o"
+            echo "clang -target bpf: $src -> $out"
+            clang -target bpf -O2 -g \
+              -I "$dir" -I /usr/include -I "/usr/include/$multiarch" \
+              -c "$src" -o "$out"
+          done < /tmp/bpf-sources
+
+      - name: Core object has the classifier/l2 and classifier/l3 sections
+        run: |
+          set -eu
+          obj=/tmp/dpd_fastpath.bpf.o
+          test -f "$obj"
+          llvm-objdump -h "$obj"
+          for sec in classifier/l2 classifier/l3; do
+            if ! llvm-objdump -h "$obj" | awk '{print $2}' | grep -Fxq "$sec"; then
+              echo "::error file=bpf/core/src/dpd_fastpath.bpf.c::missing section $sec in $obj"
+              exit 1
+            fi
+          done
+
+      - name: Compile dpdctl with -Wall -Werror
+        run: |
+          gcc -O2 -Wall -Werror -I bpf/core/src \
+            -o /tmp/dpdctl bpf/core/src/dpdctl.c
+
+  abi:
+    name: abi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ABI stamp, TC section names and counter names
+        run: |
+          # scripts/verify-abi.sh asserts, with readable messages:
+          #   * DPD_ABI_VERSION (bpf/core/src/dpd_common.h) equals the newest
+          #     ABI named in docs/ARCHITECTURE.md;
+          #   * DPD_SEC_L2/DPD_SEC_L3 are classifier/l2 and classifier/l3 and
+          #     dpd_fastpath.bpf.c attaches with those macros;
+          #   * every ST_* enumerator of enum dpd_stat_idx (ST__MAX excluded)
+          #     has the same name at the same index in dpdctl.c stat_name().
+          sh scripts/verify-abi.sh

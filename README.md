@@ -61,12 +61,39 @@ is complete. Until then, the P0 tree is a source scaffold and the original
 package makefiles are kept under each component directory.
 
 ```sh
-# host-side syntax checks
-sh -n bpf/core/files/*.sh plugins/*/files/*.sh userspace/*/*.sh
+# host-side syntax checks (no shellcheck needed)
+sh scripts/check-scripts.sh
 
 # BPF object (requires clang/llvm and kernel headers)
 make -C bpf/core
 ```
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push, pull request and by hand. Three
+jobs on `ubuntu-latest`:
+
+- `shell` - `shellcheck -S warning` on every tracked shell script (plus
+  `sh -n` via `scripts/check-scripts.sh`);
+- `bpf` - compiles every `bpf/**/*.bpf.c` with `clang -target bpf`, asserts the
+  `classifier/l2` and `classifier/l3` sections, and builds `dpdctl` with
+  `-Wall -Werror`;
+- `abi` - runs `scripts/verify-abi.sh`: the ABI stamp agrees with
+  `docs/ARCHITECTURE.md`, the section names match, and every `ST_*` counter has
+  a name in `dpdctl`'s `stat_name()`.
+
+Both scripts work without CI: `sh scripts/check-scripts.sh` is a fast
+syntax-only pass, and `sh scripts/verify-abi.sh` checks an ABI bump (add
+`--obj /lib/bpf/dpd_fastpath.bpf.o` on a build host to inspect a real object).
+
+## Feed
+
+`openwrt/feed/README.md` explains how to consume this repository as an OpenWrt
+feed: `src-link` over a generated index, per-package symlinks, or `src-git`.
+`sh scripts/feed-index.sh` builds the flat directory a feed needs (feeds only
+scan their direct children for a `Makefile`). The same README documents the
+in-place upgrade caveat: an ABI change drops the pinned `/sys/fs/bpf/dpd_*`
+maps, so the object and `dpdctl` must come from one package version.
 
 ## Test
 
