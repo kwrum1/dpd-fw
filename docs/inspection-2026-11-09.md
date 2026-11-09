@@ -98,8 +98,53 @@ curl -6 http://[2408:824c:8030:99b0:0:ff:fe22:a01]:5666/
 
 ## 7. 现场当前状态
 
-- `luci-app-ebpf 0.7.0-r5`：name 前缀归属、目标/目标端口/公网端口、
+- `luci-app-ebpf 0.7.0-r6`：name 前缀归属、目标/目标端口/公网端口、
   IPv6 同端口走纯放行；posture/uci-defaults 不再重建 `ebpf999`。
 - `dpd-napi 0.1.0-r9`：adaptive 低延迟默认。
-- `dpd-fw`：`a3a4257` + 本次巡检改动。
+- `dpdfwd 0.1.0-r2`：见下节修复。
 - 遗留：两条重复的 `Allow-Agent-SSH`（测试用，收尾时删一条）。
+
+## 8. 本轮修复（dpdfwd 0.1.0-r2）
+
+1. **邻居事件不再每 2 秒清空流表**。只有 link/addr/route 变化立即
+   epoch bump；`RTM_NEWNEIGH/DELNEIGH` 最多每 30 秒触发一次（MAC 变化仍会
+   被拾取）。实测：修复前 20 秒 10 次 bump，修复后 50 秒 2 次
+   （期间 neigh 事件 36 次），短流终于有机会活到 `accel_after`。
+2. **TTL 不再来回跳**。TTL 每 3 个 tick（30 秒）才重算一次，且单次最多
+   变化 30 秒（TCP）/20 秒（UDP）/5 秒（单向上行）；修复前日志是
+   120000↔470000，修复后按 300000→270000→240000 平滑收敛。
+3. **accel 决策要求至少 32 个样本**（原来 8 个），避免空闲时几个短流就
+   把 accel 推到 64、把加速关掉。
+4. **启动时把初始参数写回 map**。`dpd_cfg` 是 pinned map，重启前会保留
+   旧值，而 dpdfwd 从 init 参数重新开始；以前会出现 `dpdctl show` 是
+   8/130000、`flowd.json` 却是 32/300000 的不一致。现在启动先 apply 一次。
+5. **`accel_after` 默认值改为 8**（原来是 32），符合“平时最低延迟为主”；
+   自动调参只会在短流占比高时把它调高。
+6. **`dpdctl flows` 现在打印五元组**（之前只有 iface/state/pkt，无法判断
+   是哪条流）。
+
+修复后 1156 秒实测：`neigh` 事件 1012 次、`epoch_bumps` 46 次（之前约
+每 2.3 秒一次，现在平均 25 秒一次，其中 12 次是 link 变化）；TCP TTL 平滑
+收敛到 120 秒。累计命中率 v4 58%（修复前 13.8%）、v6 93%。
+
+## 9. 仍未解决：一条长命 v4 游戏流不进快路径
+
+`10.10.10.152:2917 > 47.112.198.234:21117` 持续 2–3 Mbps 小包，10 秒
+`bytes_v4` +2.7 MB、`bytes_hit_v4` 恒为 0；流表里只有 epoch=82 的旧条目，
+当前 epoch 没有这个五元组。同期 `fib_fail`/10s ≈ 2000、`fib_ok` ≈ 100。
+
+证据：`/proc/net/nf_conntrack` 里该流 reply 元组的目的地址仍是
+`10.11.43.92:2917`（即 WAN 地址），说明 DNAT 是 einat 在 TC 层做的、不进
+conntrack；而且外部端口 2917 不在 einat 配置的 20000-29999 范围内。
+
+判断：这条流没有（或已丢失）einat 绑定，einat 的 `ingress_rev_snat` 不处理
+它，DPD 在 DNAT 之前看到 `dst=WAN 地址` 的报文，`bpf_fib_lookup` 判定为
+本地投递 → `fib_fail` → 不学习。新流（NAS 下载、网页）有 einat 绑定，
+DNAT 在 DPD 之前完成，所以能到 99%。
+
+下一步二选一：
+
+- 让客户端断开重连一次，换一条新的 conntrack/einat 绑定再观察（最低成本）；
+- 切到 DPD 自有 NAT（`nat_forward=dpd` / `nat_ingress=dpd`），由 DPD 自己
+  在 pref-50 做 DNAT，不再依赖 einat 的 hook 顺序（该模式已实现并在台架
+  验证过）。
