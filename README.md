@@ -48,6 +48,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
   build and operations.
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md): the original design notes.
 - [OPERATIONS.md](docs/OPERATIONS.md): runbook.
+- [einat/README.md](einat/README.md): the full-cone NAT binaries shipped with
+  DPD (upstream source + p1/p2 patches), built and published by
+  `.github/workflows/einat.yml`.
 
 ## Packages
 

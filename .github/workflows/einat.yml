@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 kwrum1
+#
+# einat: build the full-cone NAT binaries the DPD dataplane ships.
+#
+# einat is part of the DPD dataplane (it owns SNAT/DNAT; DPD owns forwarding),
+# so it is built and published here rather than in the firmware repository.
+# The firmware package `ebpf/einat-ebpf` downloads the assets from the fixed
+# `einat-p2` tag and verifies their sha256.
+#
+# Preset: upstream `static`, i.e. without the `ipv6` cargo feature: no NAT66
+# code in the BPF program (IPv6 is routed and accelerated by DPD, never NATed).
+#
+# Patches, applied in order, anchored (upstream drift fails the job):
+#   einat/patches/einat-perf.py     p1: one less L2/L3 parse per direction
+#   einat/patches/einat-perf-p2.py  p2: dest_config fast path + established-TCP
+#                                        CT fast path
+#
+# The `test` job builds the same source for Linux in debug mode and runs
+# einat/tests/einat-e2e-nat.sh in network namespaces: EIM/EIF (full cone),
+# ICMP, a 20 MB TCP transfer (which lives on the CT fast path), and both new
+# fast paths.
+
+name: einat
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'einat/**'
+      - '.github/workflows/einat.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: einat
+  cancel-in-progress: false
+
+jobs:
+  # Functional check first: no point publishing a binary that cannot pass it.
+  test:
+    name: e2e (netns)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load pins
+        run: grep -v '^#' einat/pins.env | sed '/^$/d' >> "$GITHUB_ENV"
+
+      - name: Clone einat (pinned)
+        run: |
+          git clone "$EINAT_REPO" einat-src
+          git -C einat-src checkout "$EINAT_COMMIT"
+          git -C einat-src log -1 --pretty='%H %cI %s'
+
+      - name: Apply patches
+        run: |
+          python3 einat/patches/einat-perf.py einat-src
+          python3 einat/patches/einat-perf-p2.py einat-src
+
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libbpf-dev pkg-config libelf-dev curl iproute2 python3
+
+      - name: Build (debug, aya loader)
+        run: cd einat-src && cargo build
+
+      - name: Datapath functional checks
+        run: |
+          sudo -E EINAT="$GITHUB_WORKSPACE/einat-src/target/debug/einat" \
+              bash einat/tests/einat-e2e-nat.sh
+
+  build:
+    name: ${{ matrix.arch }}
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load pins
+        run: grep -v '^#' einat/pins.env | sed '/^$/d' >> "$GITHUB_ENV"
+
+      - name: Clone einat (pinned)
+        run: |
+          git clone "$EINAT_REPO" einat-src
+          git -C einat-src checkout "$EINAT_COMMIT"
+          git -C einat-src log -1 --pretty='%H %cI %s'
+
+      - name: Apply patches
+        run: |
+          python3 einat/patches/einat-perf.py einat-src
+          python3 einat/patches/einat-perf-p2.py einat-src
+
+      - name: Show the patched hot path
+        run: |
+          grep -n "lookup_dest_config_fast\|ct_fast_path(" -A3 einat-src/src/bpf/einat.bpf.c | head -40
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            sandbox = false
+
+      - name: Build (upstream preset static, no NAT66)
+        run: |
+          cd einat-src
+          nix build .#static-${{ matrix.arch }}-unknown-linux-musl
+          cp ./result/bin/einat "../$ASSET_PREFIX-${{ matrix.arch }}-unknown-linux-musl"
+          file "../$ASSET_PREFIX-${{ matrix.arch }}-unknown-linux-musl"
+          ls -l "../$ASSET_PREFIX-${{ matrix.arch }}-unknown-linux-musl"
+
+      - name: Smoke test the binary
+        if: matrix.arch == 'x86_64'
+        run: |
+          BIN="$ASSET_PREFIX-x86_64-unknown-linux-musl"
+          chmod +x "$BIN"
+          ./"$BIN" --help | head -5
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: einat-${{ matrix.arch }}
+          path: ${{ env.ASSET_PREFIX }}-${{ matrix.arch }}-unknown-linux-musl
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Hashes
+        run: |
+          cd out
+          sha256sum * | tee SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: einat-p2
+          name: einat p2 (full-cone NAT binaries)
+          prerelease: true
+          generate_release_notes: false
+          files: out/*
+          body: |
+            einat-ebpf built from upstream `ba647ce61bd6bdf2cb693961a82b88c442ef049a`
+            with `einat/patches/einat-perf.py` (p1) and
+            `einat/patches/einat-perf-p2.py` (p2) applied: v4-only preset, one
+            less L2/L3 parse per packet, a dest_config fast path, and an
+            established-TCP CT fast path.
+
+            Verified by the `e2e (netns)` job of this workflow run
+            (EIM/EIF, ICMP, TCP bulk, both fast paths).
+
+            Consumed by `ebpf/einat-ebpf` in kwrum1/ebpf-honk-ImmortalWRT-CI:
+            `einat-p2-<arch>-unknown-linux-musl`, sha256 pinned there.
+
+            Source: https://github.com/EHfive/einat-ebpf
