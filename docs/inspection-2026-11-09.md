@@ -77,7 +77,9 @@ EINVAL（下限 20000），脚本现在回报实际值，不再虚报。
 
 1. 遗留的 `firewall.ebpf999`（WAN→LAN 全 REJECT）排在 fw4 自动的
    `ct status dnat accept` **前面**，所有端口转发先被它拒掉。默认拒绝已经由
-   `defaults`/WAN zone 的 REJECT 策略保证，这条规则多余且有害，已删除。
+   `defaults`/WAN zone 的 REJECT 策略保证，这条规则多余且有害。它会被
+   `ebpf-posture`（S26）和 `99-luci-ebpf-trim` 在每次启动时重建，所以 r5
+   把这两个脚本改成**删除**该规则、不再创建。
 2. IPv6 端口转发用 DNAT 是空操作：报文本来就发往 NAS 地址，
    “dnat 到同一地址:同一端口”不会让 nf_nat 标记 conntrack 为 dnat，
    于是 `ct status dnat accept` 不匹配，继续落到 WAN reject。
@@ -96,8 +98,8 @@ curl -6 http://[2408:824c:8030:99b0:0:ff:fe22:a01]:5666/
 
 ## 7. 现场当前状态
 
-- `luci-app-ebpf 0.7.0-r4`：name 前缀归属、目标/目标端口/公网端口、
-  IPv6 同端口走纯放行。
+- `luci-app-ebpf 0.7.0-r5`：name 前缀归属、目标/目标端口/公网端口、
+  IPv6 同端口走纯放行；posture/uci-defaults 不再重建 `ebpf999`。
 - `dpd-napi 0.1.0-r9`：adaptive 低延迟默认。
 - `dpd-fw`：`a3a4257` + 本次巡检改动。
 - 遗留：两条重复的 `Allow-Agent-SSH`（测试用，收尾时删一条）。

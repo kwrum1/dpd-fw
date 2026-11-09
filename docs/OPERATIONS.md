@@ -244,7 +244,7 @@ rm -f /sys/fs/bpf/tc/globals/dpd_*
 
 **默认拒绝**：`ebpf-posture` 在启动时把 `defaults` 和 `wan` zone 的
 `input`/`forward` 设为 `REJECT`（`fullcone 1` 保留），并维护
-`firewall.ebpf999`（WAN→LAN REJECT）。因此 v4 和 v6 的公网入站默认全阻断，
+默认拒绝由 `firewall.@defaults[0]` 和 WAN zone 的 `input/forward=REJECT` 提供；不再使用 `firewall.ebpf999`——它排在 fw4 的 `ct status dnat accept` 前面，会让所有端口转发失效。
 只有本页写出的 `rule`/`redirect` 才能放行。页面在默认拒绝未生效时会显示
 警告和“设为默认拒绝”按钮（只改这四个值，不动 output 和其他规则）。
 
