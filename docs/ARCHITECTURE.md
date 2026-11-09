@@ -599,8 +599,16 @@ DPD 作为 bridge port 也 attach 到 `vbr`，路径与真实 LAN 客户端一�
 
 - P3：`dpd-acl`/`dpd-qos`/`dpd-mwan` meta 包已加入包集，底层仍是
   `router-acl`/`router-qos`/`ebpf-mwan`，UCI 不变。
-- P4：`dpd-napi` sysfs 版已交付并写入 `napi.json`；per-NAPI netdev-genl、
-  threaded NAPI、IRQ affinity 仍在 P4.1。
+- P4：`dpd-napi` 的 sysfs 版与 `dpd-napi-netdev`（netdev generic netlink）
+  都已交付。后者按真实 NAPI 实例设置 `gro_flush_timeout`/`defer_hard_irqs`/
+  `irq_suspend_timeout`/`threaded`，不再依赖每设备 sysfs。dpd-test 6.18 实测
+  eth1 的 4 个 NAPI（537-540）逐个设置并回读成功。
+  - UAPI 两个坑：`CTRL_ATTR_FAMILY_ID` 是 u16 而不是 u32；`NAPI_GET`/`NAPI_SET`
+    的命令号是 11/14（`QUEUE_GET` 是 10、`BIND_RX` 是 13），错一位会静默 dump
+    队列并且把设置打到 dmabuf 绑定上。
+  - 6.17 的 NAPI dump 带 ifindex 过滤会返回 EINVAL（虽然 spec 允许），所以
+    工具全量 dump 后在用户态过滤。
+  - threaded NAPI 在 vmxnet3 上不生效（驱动未 opt-in），需要真机 A/B。
 
 ## 16. 参考
 

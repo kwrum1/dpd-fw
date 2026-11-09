@@ -3,37 +3,77 @@
 `dpd-napi` is a control-plane package. It applies only standard kernel knobs;
 no driver changes.
 
-## Implemented (sysfs/sysctl)
+## Implemented
+
+### Device-wide (sysfs/sysctl)
 
 - `/proc/sys/net/core/netdev_budget`
 - `/proc/sys/net/core/netdev_budget_usecs`
 - `/proc/sys/net/core/dev_weight`
-- per-netdev `gro_flush_timeout`
-- per-netdev `napi_defer_hard_irqs`
+- per-netdev `gro_flush_timeout` / `napi_defer_hard_irqs` (legacy paths)
 - RPS: each `queues/rx-*/rps_cpus`
 - XPS: each `queues/tx-*/xps_cpus`
 
-All values come from `/etc/config/dpd_napi`; the daemon applies once at start
-and publishes `/var/run/dpd/napi.json`.
+### Per-NAPI (netdev generic netlink, kernel >= 6.10)
 
-## Not yet implemented (netdev-genl)
+`/usr/sbin/dpd-napi-netdev` talks to the kernel's `netdev` family directly
+(NETLINK_GENERIC, no libmnl/libnl). It lists the real NAPI instances and sets:
 
-The following need the `netdev` generic-netlink family, not sysfs:
+- `gro_flush_timeout`
+- `defer_hard_irqs`
+- `irq_suspend_timeout` (no sysfs file exists for this at all)
+- `threaded` (NAPI kthreads)
 
-- per-NAPI `defer-hard-irqs` / `gro-flush-timeout` / `irq-suspend-timeout`;
-- `threaded` NAPI and kthread CPU affinity;
-- per-queue IRQ affinity and RSS indirection table.
+Commands:
 
-The plan is a small C helper using libmnl/libnl (or `ynl` if present) that
-enumerates NAPI IDs and applies the same UCI values. This is P4.1; the sysfs
-version is shipped first because it is universally available.
+```
+dpd-napi-netdev list [dev]
+dpd-napi-netdev set <dev> gro_flush_timeout <ns> defer_hard_irqs <n> \
+                       [irq_suspend_timeout <ns>] [threaded <0|1>]
+```
 
-## Test plan
+The daemon uses this path when the helper exists and `netdev_genl` is enabled
+(default 1), and falls back to the sysfs path when the family is missing
+(exit code 2). `/var/run/dpd/napi.json` records `netdev_genl: true|false`.
 
-- 1G/2.5G: 64B/512B/1500B, single and 4 parallel flows;
-- `gro_flush_timeout` 0 vs 50µs/100µs; `napi_defer_hard_irqs` 0 vs 10;
-- threaded NAPI on/off, with P99 RTT and CPU per queue;
-- keep the best profile per platform in `Config/` rather than hard-coding.
+## Lab evidence (dpd-test, 6.18.0, x86_64, vmxnet3)
+
+```
+# /usr/sbin/dpd-napi-netdev list eth1
+ifindex=3 napi=540 irq=0 ... defer_hard_irqs=0 gro_flush_timeout=0 ...
+ifindex=3 napi=539 ...
+ifindex=3 napi=538 ...
+ifindex=3 napi=537 ...
+
+# /usr/sbin/dpd-napi-netdev set eth1 gro_flush_timeout 200 defer_hard_irqs 3
+# /usr/sbin/dpd-napi-netdev list eth1
+ifindex=3 napi=540 ... defer_hard_irqs=3 gro_flush_timeout=200 ...
+... (all four instances)
+```
+
+All four per-queue NAPIs of eth1 were updated individually. `threaded` is
+accepted by the family but vmxnet3 stays `threaded=0` (the driver does not
+opt in); the code treats an unsupported attribute as a no-op, not a failure.
+
+The service run writes:
+
+```
+{ "enabled": true, ..., "gro_flush_timeout": 200, "napi_defer_hard_irqs": 3,
+  "netdev_genl": true, "devices": " br-lan dummy0 eth0 eth1 eth2 teql0 vbr" }
+```
+
+## Notes
+
+- Two UAPI details cost real time while bringing this up: `CTRL_ATTR_FAMILY_ID`
+  is a **u16** (not u32), and `NAPI_GET`/`NAPI_SET` are commands **11/14**
+  (`QUEUE_GET` is 10 and `BIND_RX` is 13, so an off-by-one silently dumps
+  queue entries and "sets" a dmabuf binding).
+- Kernel 6.17 returns `-EINVAL` for a NAPI dump filtered by ifindex even
+  though the spec lists the filter; the helper dumps all and filters in
+  userspace.
+- Threaded NAPI and IRQ affinity for real drivers still need A/B numbers on
+  1G/2.5G/10G hardware; the knobs are now reachable but the profile choice is
+  per platform.
 
 ## Guardrails
 

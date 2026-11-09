@@ -49,8 +49,9 @@
 ## P4 — NAPI 与 10G
 
 - [x] `dpd-napi` sysfs 版（budget/dev_weight/gro_flush/defer_irqs/RPS/XPS）
-- [ ] `dpd-napi` netdev-genl per-NAPI 配置
-- [ ] threaded NAPI / IRQ affinity
+- [x] `dpd-napi-netdev`（netdev-genl per-NAPI：gro_flush/defer/irq_suspend/threaded）
+      - dpd-test 6.18 实测：eth1 的 4 个 NAPI（537-540）逐个设置并回读成功
+- [ ] threaded NAPI / IRQ affinity 的 A/B（vmxnet3 不支持 threaded，虚拟环境无结论）
 - [ ] GRO/GSO/TSO A/B
 - [ ] qdisc 模式与门禁
 - [ ] 1G/2.5G/10G 大包达标
