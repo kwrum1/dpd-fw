@@ -173,7 +173,7 @@ cat /var/run/ebpf/gate.json   # 门禁与原因
   dpdctl、dpd-napi）、`openwrt/*`（LuCI）、`plugins/*`。CI 在
   `.github/workflows/ci.yml`：shellcheck、BPF 编译、ABI/段落/计数器校验。
 - `ebpf-honk-ImmortalWRT-CI`：镜像/包构建。X86/RK 使用本仓库
-  `patches/honk/`（overlay + `core-p1`），IPQ/MTK 使用原版 honk。
+`patches/honk/`（源码补丁 + `core-p1`）；IPQ/MTK 使用原版 honk。
   `HONK-CORE` 构建 p1 core 并发到固定 tag `core-p1`。
 - 本地构建：`sh scripts/check-scripts.sh`、`make -C bpf/core`、
   `sh scripts/verify-abi.sh`。

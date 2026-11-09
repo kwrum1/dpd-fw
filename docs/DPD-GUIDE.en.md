@@ -190,7 +190,7 @@ Key counters: `flow_hit/flow_miss`, `bytes_hit_v4/v6`, `fib_ok/fib_fail`,
   `.github/workflows/ci.yml`: shellcheck, BPF compile, ABI/section/counter
   checks.
 - `ebpf-honk-ImmortalWRT-CI`: image/package builds. X86/RK use
-  `patches/honk/` (overlay + `core-p1`); IPQ/MTK use stock honk. `HONK-CORE`
+`patches/honk/` (source patch + `core-p1`); IPQ/MTK use stock honk. `HONK-CORE`
   builds the p1 core and publishes it under the fixed `core-p1` tag.
 - Local: `sh scripts/check-scripts.sh`, `make -C bpf/core`,
   `sh scripts/verify-abi.sh`.
