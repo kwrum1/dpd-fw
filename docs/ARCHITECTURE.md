@@ -774,6 +774,10 @@ UDP 自适应的真机/双 peer 验证。按流定向失效已落地（见 P1.1�
 - 实施顺序：x86 用软件 flowtable 验证检测逻辑 → IPQ 用 ECM/推断做实机 →
   内核 `flow_block` 回调做精确化。
 
+软硬**双加速**（不只是回退）的边界、分区/窗口两种形态、`qcom-ppe` 主线 L2
+与 NSS/ECM 的区别、探测与实施阶段，见 `docs/RESEARCH-PPE-DUAL.md`；只读探测
+脚本为 `scripts/ppe-probe.sh`。
+
 ## 17. 参考
 
 - Qualcomm NSS/ECM: https://github.com/qosmio/nss-packages
