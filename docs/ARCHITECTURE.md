@@ -694,6 +694,11 @@ ESXi 实测（2026-11-09，eth1 同时有 10.46.0.6/198.18.0.1）：
 - **`dpdfwd`（新包）**：订阅 rtnetlink 的 link/addr/route/neigh 事件，300ms
   去抖后只调用一次 `dpdctl bump`；同时订阅 conntrack new/update/destroy 做
   计数，输出 `/var/run/dpd/flowd.json`。数据面不依赖它，daemon 崩溃不影响转发。
+- **动态 Flow Manager（ABI 20）**：`dpdfwd` 从 conntrack new/destroy 采样：
+  3 秒内结束的短流比例高 → 提高 `accel_after_pkts`（最多 64），长流为主 →
+  降到 8；TTL 取观测寿命的 4 倍 EWMA，clamp 到 TCP 2–10 min、UDP 1–5 min、
+  单向 UDP 15–60 s。每 10 秒最多写一次，只在值变化时 `dpdctl set`，
+  `flowd.json` 的 `tune` 发布当前值和样本；UCI `auto_tune=0` 回退静态值。
 - **声明式分类**：`/etc/dpd/class.conf` 每行一个 5 元组 + 动作
   （`forward/proxy/block/local` + 可选 skb priority），`dpdfwd` 每 5 秒看
   mtime，变化时 `dpdctl class flush` 后逐条 `class add`；计数发布到

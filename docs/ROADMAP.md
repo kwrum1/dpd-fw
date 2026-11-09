@@ -70,6 +70,8 @@
 - [x] 网桥端口自动 attach/detach
 - [x] 配置移出热路径（per-CPU cfg 块，一次查表）
 - [x] `accel_after_pkts`（默认 32；短流不进快路径，实测 flow_hit=0）
+- [x] Flow Manager 动态决策：`dpdfwd` 按短流比例调 accel、按寿命 EWMA 调
+      TCP/UDP TTL，`auto_tune` 开关，`flowd.json` 发布 `tune`
 - [x] FIN/RST 立即释放（`ST_FLOW_FIN`）
 - [x] TCP 300s / UDP 120s / 单向 UDP 30s 超时
 - [ ] 命中路径只更新 2 个 per-CPU 计数

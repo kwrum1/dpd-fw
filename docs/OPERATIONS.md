@@ -129,7 +129,8 @@ logread | grep -E 'dpd|einat' | tail -50
 | `enabled` | 1 | 数据面总开关（BPF 内） |
 | `mode` | stateful | off/observe/stateless/stateful/neigh-probe |
 | `redirect` | auto | auto/neigh/dev |
-| `accel_after_pkts` | 32 | 新方向走栈的包数（0..127） |
+| `accel_after_pkts` | 32 | 新方向走栈的包数（0..127）；`auto_tune=1` 时是初值 |
+| `auto_tune` | 1 | `dpdfwd` 按短流比例/寿命 EWMA 动态调 accel 与 TTL（10s 一次） |
 | `tcp_ttl_ms` | 300000 | TCP 空闲超时 |
 | `udp_ttl_ms` | 120000 | 双向 UDP |
 | `udp_unidir_ttl_ms` | 30000 | 单向 UDP |
