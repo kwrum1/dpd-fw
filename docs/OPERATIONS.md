@@ -228,6 +228,37 @@ rm -f /sys/fs/bpf/tc/globals/dpd_*
 - DPD NAT 模式实测**不需要**额外的 fw4 WAN→LAN accept（einat 完全停止后
   ping/TCP 仍通）；若自建防火墙策略更严，可加一条仅 WAN→LAN 的 accept。
 
+## 8.1 简易防火墙（Network → 简易防火墙）
+
+页面由 `luci-app-ebpf` 提供，底层仍是 fw4。每一行有两种语义：
+
+- **目标留空或填“路由器”**：放行 WAN 端口到路由器本身
+  （`config rule`，`src=wan`、`dest_port`、`target=ACCEPT`）；
+- **目标填一个内网 IP**：端口转发到该主机
+  （`config redirect`，`src=wan`、`dest=lan`、`src_dport`、`dest_ip`、
+  `dest_port`、`target=DNAT`）。
+
+每行可选地址族 `any` / `ipv4` / `ipv6`；v4 目标与 `ipv6`、v6 目标与
+`ipv4` 会被拒绝保存。
+
+**默认拒绝**：`ebpf-posture` 在启动时把 `defaults` 和 `wan` zone 的
+`input`/`forward` 设为 `REJECT`（`fullcone 1` 保留），并维护
+`firewall.ebpf999`（WAN→LAN REJECT）。因此 v4 和 v6 的公网入站默认全阻断，
+只有本页写出的 `rule`/`redirect` 才能放行。页面在默认拒绝未生效时会显示
+警告和“设为默认拒绝”按钮（只改这四个值，不动 output 和其他规则）。
+
+规则由页面标记 `option dpd_simple '1'`；页面只管理自己创建的 section，
+旧版 WAN→LAN DNAT 会在下一次保存时被接管并加上标记，不会删除无关规则。
+“保存后消失”的旧问题已修复：端口有值、目标留空的行会保存成 INPUT 规则，
+不再被丢弃。
+
+验证：
+
+```sh
+uci show firewall | grep -A12 "dpd_simple='1'"
+nft list ruleset | grep -A3 'tcp dport 8080'    # INPUT 放行
+```
+
 ## 9. 容量与限制
 
 | 资源 | 上限 |

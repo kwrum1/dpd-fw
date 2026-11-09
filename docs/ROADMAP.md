@@ -23,9 +23,17 @@
 - **闭环 = 真机 N5000 上的功能验收**：矩阵与判据见
   `docs/ACCEPTANCE-N5000.md`；
 - 之后进入**交付运维阶段**：`docs/OPERATIONS.md`；
-- 真机验收前要完成的功能项：ICMP 错误报文（traceroute）、feed 接入；
-  EIF/IPv6 在真机上验证。
-- v1 明确不做：NAT66、`bpf_ct_*`、PPE/NSS 实现、GPU/NPU。
+- 真机验收前要完成的功能项：feed 接入、SPDX 收尾；EIF/IPv6 在真机上验证，
+  VLAN/双 WAN 在 ESXi 模拟环境验证；CI 构建最后确定基线。
+- 已完成（2026-11-09）：
+  - ICMP 错误报文（type 3/11/12）改写（PMTUD/traceroute），6.18.60 台架
+    加载通过，N5000 真机 traceroute 待测；
+  - 插件 ABI v1：`dpd_plugin_ops` + `dpdfwd` 加载/事件分发 +
+    `dpd-plugin-sample`，已在 6.18 台架加载成功；
+  - 简易防火墙重写：INPUT 放行 / DNAT 转发、v4+v6、默认拒绝、
+    `dpd_simple` 标记、修复“保存后消失”。
+- v1 明确不做：NAT66、`bpf_ct_*`、ACL/QoS 接入 `dpd_class`（按用户范围，
+  仅保留简单防火墙）、PPE/NSS 实现、GPU/NPU。
 
 ## P0 — 仓库与基线
 
