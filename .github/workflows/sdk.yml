@@ -30,6 +30,10 @@ name: sdk
 
 on:
   workflow_dispatch:
+  # Clean-then-build: auto-clean wipes the old apk artifacts and re-runs this.
+  workflow_run:
+    workflows: ["auto-clean"]
+    types: [completed]
   push:
     paths:
       - '.github/workflows/sdk.yml'

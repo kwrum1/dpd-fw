@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 kwrum1
+#
+# auto-clean: nightly housekeeping for this repository.
+#
+# What it removes: workflow run history (older than one day) and every
+# artifact (the SDK apks and the datapath objects).
+#
+# What it must NEVER remove: releases and tags. `core-p1` and `einat-p2` are
+# build inputs for the firmware repository -- deleting them would break every
+# X86/ROCKCHIP image build until they are rebuilt. So this job does not touch
+# releases or tags at all.
+#
+# After the cleanup it triggers the `sdk` workflow (workflow_run), i.e. the same
+# clean-then-build cycle the firmware repository uses.
+
+name: auto-clean
+
+on:
+  schedule:
+    # 20:00 UTC = 04:00 Asia/Shanghai, one hour before the firmware build.
+    - cron: 0 20 * * *
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: auto-clean
+  cancel-in-progress: false
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Delete old workflow runs
+        uses: ophub/delete-releases-workflows@main
+        with:
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
+          delete_releases: false
+          delete_tags: false
+          delete_workflows: true
+          # Keep one day so a failed run is still inspectable.
+          workflows_keep_day: 1
+
+      - name: Delete all workflow artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          gh api --paginate "/repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | [.id, .name] | @tsv' > /tmp/artifacts.tsv || true
+
+          total=$(wc -l < /tmp/artifacts.tsv)
+          echo "artifacts to delete: $total"
+          while IFS=$'\t' read -r id name; do
+            [ -n "${id:-}" ] || continue
+            echo "  delete $id  $name"
+            gh api -X DELETE "/repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null || \
+              echo "  warning: could not delete $id"
+          done < /tmp/artifacts.tsv
