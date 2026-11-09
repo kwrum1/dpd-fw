@@ -15,10 +15,11 @@ The project is intentionally **not**:
 
 ## Status
 
-**P0 scaffold.** The code migrated from
-`kwrum1/ebpf-honk-ImmortalWRT-CI` is being reorganized into `bpf/core`,
-`plugins/*`, `userspace/*`, and `openwrt/*`. The first working target is P1:
-Flow Manager + one UFS lookup + L2/L3 program variants.
+Functional on x86 (N5000, OpenWrt 6.18, ABI 20) and Rockchip. The source tree is
+organized as `bpf/core`, `userspace/*`, `openwrt/*`, `plugins/*`; the dataplane
+is validated on the N5000 (see `docs/acceptance-N5000-2026-11-09.md`,
+`docs/inspection-2026-11-09.md` and `docs/OPTIMIZATION-2026-11-10.md`). The
+image/package pipeline lives in `kwrum1/ebpf-honk-ImmortalWRT-CI`.
 
 ## Architecture
 
@@ -85,6 +86,12 @@ jobs on `ubuntu-latest`:
 Both scripts work without CI: `sh scripts/check-scripts.sh` is a fast
 syntax-only pass, and `sh scripts/verify-abi.sh` checks an ABI bump (add
 `--obj /lib/bpf/dpd_fastpath.bpf.o` on a build host to inspect a real object).
+
+The image and OpenWrt package builds live in the separate firmware repository
+`kwrum1/ebpf-honk-ImmortalWRT-CI` (its own Actions). This workflow only validates
+the source tree. Both repositories pin actions to stable major versions and use
+least-privilege `permissions`; image builds have per-workflow `concurrency` and a
+240-minute timeout.
 
 ## Feed
 
