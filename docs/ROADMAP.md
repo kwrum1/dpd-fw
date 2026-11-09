@@ -1,6 +1,24 @@
 # DPD-FW Roadmap
 
-## P0 — 仓库与基线（当前）
+## 进度概览（2026-11-09）
+
+| 阶段 | 复选框 | 完成度 | 主要缺口 |
+|---|---|---|---|
+| P0 | 12/13 | 92% | feed 接入 |
+| P1 | 7/11 | 64% | UFS 全量、按流定向失效、PPPoE A/B |
+| P2 | 2/5 | 40% | EIF、IPv6、`bpf_ct_*` |
+| P3 | 4/4 | 100% | 策略结果进 UFS（设计项，另计） |
+| P4 | 4/8 | 50% | threaded/IRQ A/B、GRO/GSO A/B、qdisc 门禁、10G/64B 门禁 |
+| P5 | 5/5 | 100% | — |
+| P6 | 0/2 | 0% | 可选 |
+| P7 | 1/6 | 17% | 仅调研，实现已挂起 |
+
+- 按 P0–P5 复选框加权：**约 68%**；
+- 按设计文档的“能力”口径：**约 55–60%**（UFS 全量字段、Flow Manager 状态机、
+  插件 ABI、full-cone/IPv6、性能门禁仍未完成）；
+- 性能验证：**约 10–15%**（只做了 payload 扫描，没有 64B PPS/10G 门禁）。
+
+## P0 — 仓库与基线
 
 - [x] 新建 `kwrum1/dpd-fw`
 - [x] 迁移 `router-dataplane` → `bpf/core`
@@ -49,24 +67,28 @@
 - [x] `dpd-acl` meta + router-acl 保留 UCI
 - [x] `dpd-qos` meta + router-qos 保留 UCI
 - [x] `dpd-mwan` meta + ebpf_mwan 保留 UCI
-- [ ] keep-settings 升级与旧 UCI alias（meta 已兼容旧名）
+- [x] keep-settings 升级与旧 UCI alias（meta + uci-defaults +
+      `/usr/lib/dpd/keep-settings.sh`）
 
 ## P4 — NAPI 与 10G
 
 - [x] `dpd-napi` sysfs 版（budget/dev_weight/gro_flush/defer_irqs/RPS/XPS）
 - [x] `dpd-napi-netdev`（netdev-genl per-NAPI：gro_flush/defer/irq_suspend/threaded）
       - dpd-test 6.18 实测：eth1 的 4 个 NAPI（537-540）逐个设置并回读成功
+- [x] `dpd-napi-irq` / `dpd-napi-gro` / `dpd-napi-qdisc` 工具（已实现，未做 A/B 门禁）
+- [x] `tests/netns` + `tests/bench` 脚本；ESXi payload 扫描
+      （64K..32M，32M 372.8 Mbps，`tests/bench/results-2026-11-09-esxi.csv`）
 - [ ] threaded NAPI / IRQ affinity 的 A/B（vmxnet3 不支持 threaded，虚拟环境无结论）
 - [ ] GRO/GSO/TSO A/B
 - [ ] qdisc 模式与门禁
-- [ ] 1G/2.5G/10G 大包达标
+- [ ] 1G/2.5G/10G 大包达标 / 64B PPS 矩阵
 
 ## P5 — 插件与 UI
 
 - [x] `dpd-honk`（唯一代理插件，控制面）
 - [x] `dpd-observe`（status/gate/plugins JSON + ubus）
 - [x] `luci-app-dpd` 页面（overview/honk/flows/napi）
-- [x] `dpd-napi` 脚本/包（sysfs 版；netdev-genl 版待 P4）
+- [x] `dpd-napi` 脚本/包（sysfs + netdev-genl per-NAPI 都已交付）
 - [x] 升级/回退演练（本地 `.apk` 安装 + 校验：`PASS: abi=15 attached=true mode=observe`）
 
 ## P6 — 可选
