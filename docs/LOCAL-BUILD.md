@@ -136,15 +136,16 @@ VM 配置不变。
 先单独编译三个包（全部通过），再做两次增量 `make -j8`：
 
 - 最终产物：`immortalwrt-x86-64-generic-squashfs-combined.img.gz`
-  （53,240,130 字节，19:15）；
-- sha256 `8950913a53b80b3a8069e5d058cc19bc8ad8450af321e146141dddb96c666f37`；
-- 镜像里的 `/lib/bpf/dpd_fastpath.bpf.o` 与 build_dir 产物 sha256 一致
-  （`0043ed92…`），`strings` 确认包含 `classifier/egress` 和
-  `classifier/nat`；
+  （53,240,306 字节，19:46）；
+- sha256 `267a31bb9c36d63f3c7c491ce6343021448b10097248c9ded02b521c925c1fd6`；
+- 镜像里的 `/lib/bpf/dpd_fastpath.bpf.o` 包含全部四个 section
+  （`classifier/l2`、`l3`、`nat`、`egress`），staging 中的
+  `/usr/sbin/dpdctl` 与 build_dir 产物 sha256 一致（`75cbc834…`），
+  并确认包含 `released %d nat binding(s)`（ABI 20 NAT 回收）；
 - 内容：ABI 20（`dpd_iface.addr4`、`dpd_nat_rev.ts_ms`、`classifier/egress`、
   `classifier/nat`、`nat_forward`/`nat_ingress`/`nat_port_*`、
   `dpdctl nat_addr|nat`、ICMP echo NAT、`dpdfwd` 的 `/etc/dpd/class.conf`）；
-- 之前那次构建（sha `cf7e475a…`）只包含第一版 ABI 20（无 ICMP、无 pref-50
-  阶段），已被这次取代；
+- 之前的两次构建（sha `cf7e475a…`、`8950913a…`）分别缺少 ICMP/pref-50 和
+  NAT 回收，均已被这次取代；
 - **尚未刷入**：实验室当前跑的是上一版镜像 + 热替换的 ABI 20 对象/二进制。
   下次刷机会用这个文件（先 `sha256sum` 校验，再 `sysupgrade -n`）。
