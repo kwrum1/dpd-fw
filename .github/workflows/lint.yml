@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  # Clean-then-build: auto-clean wipes the old runs and re-runs the checks.
+  workflow_run:
+    workflows: ["auto-clean"]
+    types: [completed]
   schedule:
     # Weekly sanity run (the old firmware-repo BPF-CHECK role).
     - cron: "0 18 * * 0"
