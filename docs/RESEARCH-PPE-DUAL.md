@@ -202,3 +202,47 @@ option ppe_accel_after '64'   # IPQ profile 覆盖 accel_after_pkts
 - 现有回退调研：`docs/RESEARCH-PPE-FALLBACK.md`
 - conntrack 状态位：`include/linux/netfilter/nf_conntrack_common.h`
   （`IPS_OFFLOAD_BIT=14`、`IPS_HW_OFFLOAD_BIT=15`）
+
+## 12. 参考基线：VIKINGYFY/immortalwrt `owrt`（2026-11-09 核对）
+
+该分支是 **多平台** ImmortalWrt（README 写明 MTK/QCA/QCB，来源含
+`JuliusBairaktaris/openwrt-ppe-nss`），Qualcomm 部分有两条完全不同的路径：
+
+### 12.1 qualcommax（IPQ807x / IPQ60xx / IPQ50xx）
+
+- **PPE 驱动在树内**：`target/linux/qualcommax/files/drivers/net/ethernet/qualcomm/`
+  下有 `qca_edma.c`、`qca_ppe_main.c`、`qca_ppe_flow_offload.c`、
+  `qca_ppe_flow.c`、`qca_ppe_acl.c`、`qca_ppe_scheduler.c`、`qca_ppe_vlan.c`。
+- `qca_ppe_flow_offload.c` 明确是 **netfilter flowtable offload**：支持
+  SNAT/DNAT、PPPoE、VLAN、DSA、IPv6；**同时改写 SNAT 和 DNAT 的规则会被拒绝**
+  （硬件字段重叠），留在软件。
+- 配置：`target/linux/qualcommax/ipq807x/config-default` 有
+  `CONFIG_QCOM_EDMA=y`、`CONFIG_QCOM_80211AX_PPE=y`（WiFi PPE）；
+  `QCOM_PPE` 符号未开，说明这里的 PPE 是 **EDMA 驱动里的 PPE 子块**，
+  不是上游新的 `qcom-ppe`。
+- **NSS 只用于 WiFi**：`package/qca-nss/nss-wifi-drv`（WLAN ring 交给 NSS
+  固件），没有 `qca-nss-ecm`/`qca-nss-dp`/`qca-nss-drv` 的以太网 L3 栈。
+- `package/network/config/qca-ppe-qos` + LuCI：配置 PPE 硬件 QoS
+  （DSCP→priority、switch ACL via tc flower、small-packet priority）。
+  注释明确：**PPE 卸载后的流不再回 CPU**，所以 QoS 标记必须走 switch ACL，
+  nftables mangle 只能看到卸载前的包。
+
+### 12.2 qualcommbe（IPQ53xx / IPQ95xx）
+
+- 设备：GL-BE6500、JDCloud RE-CS-06、Ubiquiti U7 Pro XGS、8devices
+  Kiwi-DVK、Askey SBE1V1K、Linksys LN6001。
+- 用新一代 **`qcom-ppe` + EDMA**，但 `target/linux/qualcommbe/config-6.18`
+  里 **`CONFIG_QCOM_PPE is not set`**；patches 只加 EDMA for IPQ9 和运行时
+  调优，**没有 L3 flow offload 实现**。
+
+### 12.3 对双加速计划的影响
+
+- 用户要的“1 的 L3”如果指 **IPQ95xx 新 PPE**：需要先把 `QCOM_PPE` 打开，
+  再把 qualcommax 的 `qca_ppe_flow_offload.c` 作为参考，移植/实现
+  netfilter flowtable 回调（SNAT/DNAT/PPPoE/VLAN）。
+- “2 的分层”在 QCA 上走的是**flowtable 模型**（不是 NSS）：首包走主机，
+  之后 `IPS_OFFLOAD`/`IPS_HW_OFFLOAD` 生效；DPD 在 grace 前不抢流，
+  卸载后包不进 TC，天然不冲突；NAT 由 conntrack/PPE 规则携带，不需要
+  NSS 的 `nat_offload=0` 约束。
+- 同时改写 SNAT+DNAT 的流（PPE 拒绝）和 PPE 失败的流，正好是 DPD 的
+  软件回退候选。
