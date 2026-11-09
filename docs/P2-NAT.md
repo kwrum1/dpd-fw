@@ -93,6 +93,13 @@ directions.
 
 ## Limits / next
 
+- einat and fw4 `masquerade` must not be active at the same time. If both are,
+  the slow-path packets get an nft-allocated external port while the
+  accelerated ones get einat's port, and bulk flows stall after the priming
+  window (measured 2026-11-09 while testing with `firewall.@zone[1].masq=1`).
+  einat's init already injects the fw4 override that turns masking off; the
+  gate only sets `nat_offload` when einat is attached, so the combo is a
+  misconfiguration rather than a default.
 - `bpf_ct_*` is not used: einat's own `map_ct` remains the only state.
 - IPv6 stays routed-only (no NAT66), as before.
 - The mirror is a 1 Hz polling daemon. It is control-plane only; the packet

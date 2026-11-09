@@ -595,6 +595,12 @@ DPD 作为 bridge port 也 attach 到 `vbr`，路径与真实 LAN 客户端一�
 `(192.168.10.200:52356 -> 198.18.0.2:8000) egress=3 flags=0x182`，
 其中 `0x80` 是 `DPD_FLOW_F_NAT`。
 
+**约束**：einat 与 fw4 `masquerade` 不能同时开启。两者都开时，慢路径包由 nft
+分配外部端口、加速包由 einat 分配另一个端口，同一连接会出现两个源端口，批量
+传输在 prime 窗口后卡死（2026-11-09 用 `masq=1` 复现）。einat 的 init 本来就会
+通过 procd 注入规则关掉 masq，gate 也只在 einat 确认挂在上行时才置
+`nat_offload`，所以这是误配置而非常态。
+
 ### P3 / P4
 
 - P3：`dpd-acl`/`dpd-qos`/`dpd-mwan` meta 包已加入包集，底层仍是
