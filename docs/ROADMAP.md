@@ -28,11 +28,14 @@
 
 ## P2 — NAT / full-cone / IPv6
 
-- [x] P2.0 safe mode：NAT 上行不做 LAN→WAN 接管，回程仍加速
-      （ESXi `masq=1` 实测 32MB 下载 7.98s，`flow_hit` 增长）
-- [ ] P2.1 UFS+einat NAT 合并（前向/上传也加速）
-- [ ] 正反双向 UFS
-- [ ] 陌生入站 EIF
+- [x] P2.1 UFS+einat NAT 合并（前向/上传也加速，ABI 16）
+      - `dpd_nat` 只做准入闸门，SNAT 仍由 einat TCX egress 完成（在 ingress 重写会被
+        einat 二次 SNAT，实测 9044→9300，ACK 全丢）
+      - `DPD_FLOW_F_NAT` 标记只作用在上行 flow；回程不做 `dpd_nat` 查询
+      - ESXi netns 客户端：32MB 上传 `PEER 198.18.0.1:28721 BYTES 33554432`，
+        `flow_hit` 9968→20100，`nat_gone=0`
+- [x] 正反双向 UFS（前向 egress=eth1、回程 DNAT 后入 UFS）
+- [ ] 陌生入站 EIF（einat 已具备，需双 peer 验证）
 - [ ] IPv6 双向（状态防火墙或 NAT66）
 - [ ] `bpf_ct_*` 可选路径
 

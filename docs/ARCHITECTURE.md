@@ -529,38 +529,71 @@ P5 的边界（必须如实报告）：
   绕过 einat 的 SNAT，bulk TCP 会失败；P5 的 UI 不掩盖这一点；
 - 全量固件镜像构建尚未在本轮本地完成，当前验证用的是云镜像 + 本地包。
 
-## 15. P2.0 / P3 / P4 进展（2026-11-09）
+## 15. P2.1 / P3 / P4 进展（2026-11-09）
 
-### P2.0 safe mode（已实现）
+### P2.1 双向加速（ABI 16，已验证）
 
-LAN→WAN 的 FIB 出口如果带学到的 IPv4 nexthop（NAT 上行），DPD 不再接管前向；
-首包/前向交给 fw4/einat SNAT，回程在 einat 反 NAT 之后仍然学习并加速。
+结论先说：**不能在 ingress 重写源地址**。DPD 从 ingress redirect 出去的 skb
+仍然会经过 einat 的 TCX egress；einat 看到源地址已经是外部地址，会按
+“external IP SNAT to itself” 再分配一个端口（实测
+`198.18.0.1:9044 -> 198.18.0.1:9300`），服务端 ACK 全部对不上，连接卡在
+prime 窗口。
 
-ESXi `dpd-test` 验证（WAN 上 `masq=1`）：
-
-- 32 MB 下载：`7.98s` 完成，不再出现 bulk TCP 失败；
-- `flow_hit=39`、`redirect=39`，流表只有回程条目；
-- 这是“下载加速、上传慢路径”的安全模式，不是最终双向方案。
-
-### P2.1 的下一步（已定位可用的数据）
-
-einat 的 `map_binding` BTF/布局已实测：
+最终设计：
 
 ```
-map_binding_key   12B: ifindex, flags, l4proto, from_port, from_addr
-map_binding_value 28B: to_addr, to_port, flags, is_static, outbound_ref,
-                       ref, seq, ct_state_cached, ct_touch_ms
-map_ct_key        20B: ifindex, flags, l4proto, pad, external tuple
-map_ct_value      40B: origin tuple, flags, pad, state, seq, timer
+LAN ingress（classic pref 100, DPD）
+    前向命中 -> dpd_nat 闸门 -> bpf_redirect(eth1)
+                                     |
+                                     v
+                         einat TCX egress（真正做 SNAT）
+                                     |
+                                     v
+                                   WAN
+
+WAN ingress（einat TCX 先，DPD classic 后）
+    einat 反 SNAT（DNAT） -> DPD 回程命中 -> redirect 到 br-lan
 ```
 
-`map_binding` 正是前向 SNAT 所需的“内网 (addr,port) -> 外部 (addr,port)”映射。
-P2.1 有两条实现路径：
+- `dpd_nat` 只是**准入闸门**，保存
+  `(内网 addr, port, proto) -> (外部 addr, port)`，由 `dpd-einat-sync` 从
+  einat 的 `map_binding`（只取 `BINDING_ORIG_DIR_FLAG`）1 Hz 镜像；
+- 学习前向 flow 时，如果 FIB 出口带学到的 IPv4 nexthop，就打
+  `DPD_FLOW_F_NAT (0x0080)`；**只有带这个标记的 flow 在命中时复查
+  `dpd_nat`**，回程不受影响；
+- 绑定在 flow 存活期间消失时，下一次命中返回 `TC_ACT_UNSPEC` 并计
+  `ST_NAT_GONE`，交回栈由 einat 重建，不会把未 NAT 的包发出去；
+- 镜像进程从**活着的程序的 map_ids** 解析 map，而不是按名字找：einat/DPD
+  重启后旧 map 仍带同名，按名字会连到已死的实例（实测踩过）。
 
-1. DPD 自己的 `dpd_nat` 镜像表，由 `dpd-einat` 从 einat map 同步，UFS 命中时
-   直接写回；不需要修改 einat 二进制。
-2. 自定义 loader 用 `bpf_map__reuse_fd` 复用 einat 的 map FD；少一次同步，
-   但要把 `tc` 加载改成 libbpf loader。
+### 实验环境的重要修正
+
+ESXi 里原来那台“客户端”VM 根本不在 dpd-test 的 LAN 上（其 192.168.10.1
+的 MAC 不是 dpd-test br-lan 的 MAC），所以此前所有客户端侧的 P2 结论都不可信。
+现在用 network namespace + veth 挂进 br-lan：
+
+```
+ip netns add lc
+ip link add vlc type veth peer name vbr
+ip link set vlc netns lc
+ip link set vbr master br-lan up
+ip -n lc addr add 192.168.10.200/24 dev vlc
+ip -n lc route add default via 192.168.10.1
+```
+
+DPD 作为 bridge port 也 attach 到 `vbr`，路径与真实 LAN 客户端一致。
+
+### 实测（ABI 16）
+
+| 方向 | 条件 | 结果 |
+|---|---|---|
+| 下载 32MB | `vbr` egress tbf 20Mbit | 14.05s 完成，`flow_hit=26774 redirect=26774 nat_gone=0` |
+| 上传 32MB | `eth1` egress tbf 20Mbit，netns `nc` 到 198.18.0.2:9000 | 服务端记录 `PEER 198.18.0.1 28721 BYTES 33554432`，`flow_hit 9968->20100`，`nat_gone=0` |
+
+`28721` 在 einat 的外部端口段 20000-29999 内，字节数精确，说明加速后的前向
+包经过 einat SNAT 且校验和正确。前向 flow 形如
+`(192.168.10.200:52356 -> 198.18.0.2:8000) egress=3 flags=0x182`，
+其中 `0x80` 是 `DPD_FLOW_F_NAT`。
 
 ### P3 / P4
 
