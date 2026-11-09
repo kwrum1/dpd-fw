@@ -125,6 +125,12 @@ jobs:
           mkdir -p "$target/pkginfo"
           printf 'libc.so\nlibgcc_s.so.1\n' > "$target/pkginfo/libc.provides"
           printf 'libgcc_s.so.1\n' > "$target/pkginfo/libgcc.provides"
+          # The package looks for bpf/bpf_helpers.h under $(STAGING_DIR)/usr/include,
+          # which a bare SDK does not populate (libbpf is not built). Copy the
+          # host's libbpf headers there instead of pointing -I at /usr/include,
+          # which would hide the toolchain's asm/types.h.
+          mkdir -p "$target/usr/include"
+          cp -r /usr/include/bpf "$target/usr/include/"
 
           # The package is only built when it is enabled; defconfig does not
           # always select local packages, so pass the symbol on the command
@@ -136,7 +142,7 @@ jobs:
             if make -C "package/$dir" TOPDIR="$PWD" \
               BUILD_SUBDIR="package/$dir" BUILD_VARIANT= ALL_VARIANTS= \
               compile CONFIG_PACKAGE_"$name"=m CONFIG_SIGN_EACH_PACKAGE= \
-              CLANG=clang BPF_DEPENDS= DPD_BPF_INCLUDES=-I/usr/include \
+              CLANG=clang BPF_DEPENDS= \
               > "/tmp/build-$name.log" 2>&1; then
               echo "ok: $name"
             else

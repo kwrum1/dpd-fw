@@ -74,7 +74,9 @@ jobs:
       - name: Install clang, llvm and headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm gcc libbpf-dev linux-libc-dev
+          # gcc-multilib: -target bpf defines no __x86_64__, so glibc's
+          # gnu/stubs.h takes the 32-bit branch and needs gnu/stubs-32.h.
+          sudo apt-get install -y clang llvm gcc gcc-multilib libbpf-dev linux-libc-dev
 
       - name: Compile every bpf source for the BPF target
         run: |
