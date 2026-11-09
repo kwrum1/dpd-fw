@@ -601,6 +601,20 @@ DPD 作为 bridge port 也 attach 到 `vbr`，路径与真实 LAN 客户端一�
 通过 procd 注入规则关掉 masq，gate 也只在 einat 确认挂在上行时才置
 `nat_offload`，所以这是误配置而非常态。
 
+### P2.2 回程 DNAT 由 DPD 完成（ABI 19，可选）
+
+- `dpd-einat-sync` 除正向 binding 外，还把 einat 的**反向 binding**
+  （external tuple -> internal tuple）镜像到 `dpd_nat_rev`；
+- `cfg.nat_ingress=1` 时，WAN 入包在 UFS 查表**之前**用 `dpd_nat_rev`
+  做 DNAT（改 daddr/dport + 校验和），然后继续正常的 UFS/FIB 流程；
+- **默认安全**：einat 的 ingress TCX 还挂着时，包已经被它 DNAT 过，
+  `dpd_nat_rev` 的 key 不匹配，DPD 什么都不做（`nat_dnat` 保持 0）；
+- 只有把 einat 的 **ingress link** detach 之后才生效（egress 继续负责
+  前向 SNAT 和端口分配）。ESXi 实测：detach ingress 后 1MB 下载 OK，
+  `nat_dnat=332`；恢复 einat 后 `nat_dnat=0`、下载正常。
+- 这是“回程一次查表”的半步：前向 SNAT 仍由 einat egress 完成，
+  完整的一次查表需要 DPD 自己拥有 SNAT/端口分配（P2.3）。
+
 ### P1 Flow Manager（ABI 17，已实现 MVP）
 
 数据面仍然由 BPF 学习直连流，`dpdfwd` 只做控制面事件；两者分工如下：
@@ -624,9 +638,8 @@ ESXi（ABI 17）验证：
 | 路由增删 | `epoch 0→1`，`epoch_bumps=1`（两次事件合并成一次） |
 | 一次 TCP 请求 | `flowd.json` `ct_new=6` |
 
-还没做：按流定向失效（UFS key 带 ifindex，conntrack 消息没有，需要
-cookie 映射）、UDP 自适应的真机/双 peer 验证、把 `accel_after`/TTL 由
-`dpdfwd` 动态决策（现在由 UCI 静态下发）。
+还没做：把 `accel_after`/TTL 由 `dpdfwd` 动态决策（现在由 UCI 静态下发）；
+UDP 自适应的真机/双 peer 验证。按流定向失效已落地（见 P1.1）。
 
 ### P1.1 UFS v2 + 策略缓存（ABI 18，已实现）
 

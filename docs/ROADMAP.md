@@ -6,14 +6,14 @@
 |---|---|---|---|
 | P0 | 12/13 | 92% | feed 接入 |
 | P1 | 10/12 | 83% | PPPoE A/B、Flow Manager 分类决策 |
-| P2 | 2/5 | 40% | EIF、IPv6、`bpf_ct_*` |
+| P2 | 3/7 | 43% | EIF、IPv6、`bpf_ct_*`、前向 SNAT 归 DPD |
 | P3 | 5/5 | 100% | ACL/QoS 分类器接入 dpd_class（机制已就绪） |
 | P4 | 4/8 | 50% | threaded/IRQ A/B、GRO/GSO A/B、qdisc 门禁、10G/64B 门禁 |
 | P5 | 5/5 | 100% | — |
 | P6 | 0/2 | 0% | 可选 |
 | P7 | 1/6 | 17% | 仅调研，实现已挂起 |
 
-- 按 P0–P5 复选框加权：**约 73%**；
+- 按 P0–P5 复选框加权：**约 74%**；
 - 按设计文档的“能力”口径：**约 55–60%**（UFS 全量字段、Flow Manager 状态机、
   插件 ABI、full-cone/IPv6、性能门禁仍未完成）；
 - 性能验证：**约 10–15%**（只做了 payload 扫描，没有 64B PPS/10G 门禁）。
@@ -63,6 +63,10 @@
       - ESXi netns 客户端：32MB 上传 `PEER 198.18.0.1:28721 BYTES 33554432`，
         `flow_hit` 9968→20100，`nat_gone=0`
 - [x] 正反双向 UFS（前向 egress=eth1、回程 DNAT 后入 UFS）
+- [x] P2.2 回程 DNAT 由 DPD 完成（ABI 19，`nat_ingress=dpd`，
+      `dpd_nat_rev` 从 einat 反向 binding 镜像；detach einat ingress 后
+      1MB 下载 OK、`nat_dnat=332`；默认与 einat ingress 共存安全）
+- [ ] P2.3 前向 SNAT/端口分配归 DPD（完整“一次查表”）
 - [ ] 陌生入站 EIF（einat 已具备，需双 peer 验证）
 - [ ] IPv6 双向（状态防火墙或 NAT66）
 - [ ] `bpf_ct_*` 可选路径
