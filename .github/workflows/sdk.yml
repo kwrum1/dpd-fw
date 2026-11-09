@@ -38,7 +38,9 @@ on:
     paths:
       - '.github/workflows/sdk.yml'
   schedule:
-    - cron: 0 3 * * 1
+    # Backup weekly run (Monday 03:00 Asia/Shanghai); the daily path is
+    # auto-clean -> workflow_run.
+    - cron: 0 19 * * 0
 
 permissions:
   contents: read

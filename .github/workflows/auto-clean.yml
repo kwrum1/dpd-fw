@@ -18,8 +18,9 @@ name: auto-clean
 
 on:
   schedule:
-    # 20:00 UTC = 04:00 Asia/Shanghai, one hour before the firmware build.
-    - cron: 0 20 * * *
+    # 19:00 UTC = 03:00 Asia/Shanghai: artifacts are rebuilt one hour before
+    # the firmware pipeline runs at 04:00.
+    - cron: 0 19 * * *
   workflow_dispatch:
 
 permissions:
