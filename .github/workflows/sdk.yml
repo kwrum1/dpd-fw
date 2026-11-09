@@ -108,11 +108,18 @@ jobs:
           set -euo pipefail
           cd sdk
           make defconfig >/dev/null
+          # A fresh SDK has no libc/libgcc metadata: package-pack.mk checks each
+          # package's DT_NEEDED against the provides files of its implicit deps,
+          # finds nothing, and refuses to create the apk. Seed the two SONAMEs.
+          pkginfo=$(echo staging_dir/target-*/pkginfo)
+          mkdir -p "$pkginfo"
+          printf 'libc.so\nlibgcc_s.so.1\n' > "$pkginfo/libc.provides"
+          printf 'libgcc_s.so.1\n' > "$pkginfo/libgcc.provides"
           for p in dpdfwd dpd-napi luci-app-ebpf router-dataplane; do
             echo "== $p"
             make -C "package/$p" TOPDIR="$PWD" \
               BUILD_SUBDIR="package/$p" BUILD_VARIANT= ALL_VARIANTS= \
-              compile \
+              compile CONFIG_SIGN_EACH_PACKAGE= \
               CLANG=clang BPF_DEPENDS= DPD_BPF_INCLUDES=-I/usr/include
           done
 

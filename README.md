@@ -1,130 +1,106 @@
-# dpd-fw
+# DPD 加速系统（dpd-fw）
 
-**DPD-FW** is an OpenWrt high-performance dataplane framework built on TC/eBPF.
-It turns the existing `dpd-fastpath` into a unified flow-state fastpath with an
-ECM-style flow manager, a plugin ecosystem, and NAPI/queue-level tuning.
+**DPD = Dynamic Packet Datapath（动态报文数据面）。**
 
-The project is intentionally **not**:
+本文统一使用全称简称 **DPD**，产品/系统层面称 **DPD 加速系统**；仓库名 `dpd-fw`
+（DPD firmware/dataplane）指它的实现与打包部分。
 
-- XDP / AF_XDP / DPDK / driver-specific; the default path must run on x86 and
-  ARM (Rockchip) with stock drivers.
-- a second NAT or firewall owner; NAT belongs to the `dpd-einat` plugin, policy
-  belongs to `dpd-acl`, proxying belongs to `dpd-honk`.
-- a hardware offload replacement for NSS/PPE. It borrows their flow-management
-  model, not their silicon.
+## 1. 为什么叫 DPD
 
-## Status
+三个词对应三件事：
 
-Functional on x86 (N5000, OpenWrt 6.18, ABI 20) and Rockchip. The source tree is
-organized as `bpf/core`, `userspace/*`, `openwrt/*`, `plugins/*`; the dataplane
-is validated on the N5000 (see `docs/acceptance-N5000-2026-11-09.md`,
-`docs/inspection-2026-11-09.md` and `docs/OPTIMIZATION-2026-11-10.md`). The
-image/package pipeline lives in `kwrum1/ebpf-honk-ImmortalWRT-CI`.
+- **Dynamic（动态）**：加速不是全局开关，而是**按流**决定。每条流先由 Flow Manager
+  观察，达到阈值后才被数据面接管；链路、地址、路由、邻居变化会让整个流表失效重学，
+  流量特征变化时接管参数（priming、TTL、计数采样）会自动调整。
+- **Packet（报文）**：干活的单位是报文。在 `tc` ingress/egress 上直接查流缓存、
+  改写二层头、`bpf_redirect` 发出去，不经过 netfilter、路由、qdisc 的慢路径。
+- **Datapath（数据面）**：它是一条**旁路数据面**，不是新的协议栈。没命中、没学会、
+  被门禁拦下的报文原样交回内核协议栈，行为与没有 DPD 时一致。
 
-## Architecture
+合起来就是：**一张会自己学习和失效的报文级转发快路径**。所以叫动态报文数据面，
+简称 DPD；加上固件/打包这一层，就是 DPD 加速系统。
+
+## 2. 它解决什么问题
+
+OpenWrt 的转发默认走完整协议栈：netfilter/conntrack → 路由 → 邻居 → qdisc。
+家宽到千兆以后，这条路径的每包开销开始压在软中断上，而且它和透明代理、硬件卸载
+互相抢流。
+
+DPD 的做法是把**已经确认的流**记下来，下一个包直接转发：
 
 ```
-dpd-flowd (control plane)
-  conntrack / honk / einat / ACL / QoS / MWAN events
-  NEW -> OBSERVE(N packets) -> BIND -> FIN
-        |
-        v
-dpd-core (TC eBPF data plane)
-  L2 variant / L3 variant -> one UFS lookup
-  NAT rewrite -> TTL -> VLAN -> emit -> per-CPU stats
-        |
-        v
-dpd-napi (system layer)
-  NAPI threads / IRQ affinity / GRO / GSO / qdisc / RSS / XPS
+第一个包（或前 N 个） → 协议栈照常处理（conntrack/防火墙/代理都看得到）
+       ↓ Flow Manager 学习、门禁检查
+后续报文 → TC eBPF 查流缓存 → 直接改写 + redirect（不再进协议栈）
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
+这样防火墙、NAT、代理的策略判断一次都不少，但只发生在流的开头。
 
-## Documentation
+## 3. 组成
+
+```
+┌──────────────────────────── 控制面 ────────────────────────────┐
+│ dpdfwd       流生命周期、ctnetlink、自动调参、epoch、插件宿主  │
+│ dpdctl       map / 流表 / 本地地址 / NAT 绑定的命令行           │
+│ dpd-napi     NAPI / IRQ / GRO / RPS / XPS / qdisc 调优          │
+│ LuCI         状态、简易防火墙、多 WAN、NAPI/DPD 页面            │
+└───────────────────────────────┬────────────────────────────────┘
+                                │ pinned BPF maps
+┌───────────────────────────────┴────────────────────────────────┐
+│ TC eBPF 数据面（bpf/core/src/dpd_fastpath.bpf.c）               │
+│  classifier/l2   LAN 入口（br-lan / 网桥端口）                  │
+│  classifier/l3   WAN 入口（pppoe-wan，downlink=1）              │
+│  classifier/nat  WAN ingress（DPD 自有 NAT 时的 DNAT）          │
+│  classifier/egress  WAN egress（DPD 自有 NAT 时的 SNAT）        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+插件：`dpd-honk`（honk 生命周期与门禁）、`dpd-einat`（NAT 绑定同步）、
+`dpd-acl`、`dpd-qos`、`dpd-mwan`、`dpd-observe`。
+
+## 4. 它不是什么
+
+- 不是 XDP/AF_XDP/DPDK，也不接管驱动：只用 `tc` 钩子，x86 和 ARM 用原厂驱动就能跑。
+- 不是第二个防火墙、第二个 NAT（默认 NAT 归 einat）、第二个 flowtable。
+- 不替代 PPE/NSS/HNAT：同一**条**流不会被两层同时加速，DPD 只接硬件接不住的那部分。
+- 不是透明代理：代理归 honk，DPD 只负责把 honk 放行的 direct 流转发掉。
+
+## 5. 数据从哪来、到哪去
+
+- NAT：默认由 **einat**（TC eBPF full-cone NAT）拥有，DPD 只加速它已经正确 NAT 的流；
+  einat 绑定与反查必须一致，否则不学习（`nat_gone`）。
+- 代理：honk 在 LAN TCX 上做分流，direct 流以 `TC_ACT_UNSPEC` 交回经典 TC 链，
+  DPD 就在这条链上接管；proxy/block 仍是终态。
+- 硬件：PPE/NSS 卸载后的报文不进 TC，DPD 看不到也不抢。
+
+## 6. 包
+
+| 包 | 作用 |
+|---|---|
+| `dpd-fastpath` | UFS 流缓存 + `dpdctl` + BPF 对象 |
+| `dpdfwd` | Flow Manager（控制面，不碰报文） |
+| `dpd-napi` | NAPI/IRQ/GRO/RSS/qdisc 调优 |
+| `dpd-einat` | full-cone NAT 绑定与 EIF |
+| `dpd-honk` | honk 生命周期与门禁 |
+| `dpd-acl` / `dpd-qos` / `dpd-mwan` / `dpd-observe` | 策略、QoS、多 WAN、可观测性 |
+| `luci-app-dpd` | 状态与插件页面 |
+
+## 7. 构建与发布
+
+- 源码：`bpf/core`（BPF + dpdctl）、`userspace/*`、`openwrt/*`、`plugins/*`。
+- CI（本仓库）：`lint`（BPF/dpdctl 编译、ABI、shell）、`sdk`（用官方 OpenWrt SDK
+  出 `dpdfwd / dpd-fastpath / dpd-napi / luci-app-ebpf` 的 apk，不需要整镜像）、
+  `einat`（full-cone NAT 二进制）、`honk-core`（direct 流回调经典 TC 链的 honk core）、
+  `upstream`（补丁锚点）、`auto-clean`（03:00 清 artifacts 后重建）。
+- 固件镜像由 `kwrum1/ebpf-honk-ImmortalWRT-CI` 构建，只从这里下载
+  `core-p1` 和 `einat-p2` 两个固定 tag 的产物；IPQ/MTK 镜像完全不依赖本仓库。
+
+## 8. 文档
 
 - [DPD-FW 技术说明（中文）](docs/DPD-GUIDE.zh-CN.md) /
-  [Technical Guide (English)](docs/DPD-GUIDE.en.md): architecture, packet path,
-  flow lifecycle, NAT ownership, honk/PPE coexistence, NAPI, observability,
-  build and operations.
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md): the original design notes.
-- [OPERATIONS.md](docs/OPERATIONS.md): runbook.
-- [einat/README.md](einat/README.md): the full-cone NAT binaries shipped with
-  DPD (upstream source + p1/p2 patches), built and published by
-  `.github/workflows/einat.yml`.
-
-## Packages
-
-| Package | Purpose |
-|---|---|
-| `dpd-core` | UFS BPF programs, `dpdfwd`, `dpdctl`, `libdpd` |
-| `dpd-honk` | optional proxy plugin; honk is the only proxy provider |
-| `dpd-einat` | full-cone NAT binding and EIF |
-| `dpd-acl` | TC-layer ACL / firewall fast path |
-| `dpd-qos` | DSCP / CAKE / SQM / short-packet priority |
-| `dpd-mwan` | multi-WAN selection and failover |
-| `dpd-observe` | flow statistics, gate/status, telemetry |
-| `dpd-napi` | NAPI, IRQ, GRO/GSO, qdisc and RSS/XPS tuning |
-| `luci-app-dpd` | LuCI UI |
-| `dpd-fw` | meta package |
-
-## Build
-
-The OpenWrt packages live under `openwrt/` (LuCI), `userspace/*`, `plugins/*`
-and `bpf/core`; the image/package build runs in
-`kwrum1/ebpf-honk-ImmortalWRT-CI`, which vendors this tree under `ebpf/`. The
-feed layout is documented in `openwrt/feed/README.md`.
-
-```sh
-# host-side syntax checks (no shellcheck needed)
-sh scripts/check-scripts.sh
-
-# BPF object (requires clang/llvm and kernel headers)
-make -C bpf/core
-```
-
-## CI
-
-`.github/workflows/ci.yml` runs on every push, pull request and by hand. Three
-jobs on `ubuntu-latest`:
-
-- `shell` - `shellcheck -S warning` on every tracked shell script (plus
-  `sh -n` via `scripts/check-scripts.sh`);
-- `bpf` - compiles every `bpf/**/*.bpf.c` with `clang -target bpf`, asserts the
-  `classifier/l2` and `classifier/l3` sections, and builds `dpdctl` with
-  `-Wall -Werror`;
-- `abi` - runs `scripts/verify-abi.sh`: the ABI stamp agrees with
-  `docs/ARCHITECTURE.md`, the section names match, and every `ST_*` counter has
-  a name in `dpdctl`'s `stat_name()`.
-
-Both scripts work without CI: `sh scripts/check-scripts.sh` is a fast
-syntax-only pass, and `sh scripts/verify-abi.sh` checks an ABI bump (add
-`--obj /lib/bpf/dpd_fastpath.bpf.o` on a build host to inspect a real object).
-
-The image and OpenWrt package builds live in the separate firmware repository
-`kwrum1/ebpf-honk-ImmortalWRT-CI` (its own Actions). This workflow only validates
-the source tree. Both repositories pin actions to stable major versions and use
-least-privilege `permissions`; image builds have per-workflow `concurrency` and a
-240-minute timeout.
-
-## Feed
-
-`openwrt/feed/README.md` explains how to consume this repository as an OpenWrt
-feed: `src-link` over a generated index, per-package symlinks, or `src-git`.
-`sh scripts/feed-index.sh` builds the flat directory a feed needs (feeds only
-scan their direct children for a `Makefile`). The same README documents the
-in-place upgrade caveat: an ABI change drops the pinned `/sys/fs/bpf/dpd_*`
-maps, so the object and `dpdctl` must come from one package version.
-
-## Test
-
-- `tests/netns`: namespaces for PPPoE/VLAN/NAT/full-cone.
-- `tests/qemu`: full image boot and datapath tests.
-- `tests/bench`: iperf3, pktgen/Trex, sockperf, NAPI/map profiling.
-- ESXi lab: `router-lab` (OpenWrt) + `ebpf-client2` (OpenWrt) on
-  `10.1.18.124`; serial consoles 7005/7004.
-
-## License
-
-- Core (BPF, kernel glue, userspace): GPL-2.0-only.
-- `dpd-honk`: GPL-3.0-only (separate process/plugin; it does not link the core).
-- Documentation: CC BY 4.0 unless noted.
+  [Technical Guide (English)](docs/DPD-GUIDE.en.md)：架构、包路径、流生命周期、
+  NAT 归属、与 honk/PPE 共存、NAPI、可观测性。
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md)：早期设计笔记。
+- [OPERATIONS.md](docs/OPERATIONS.md)：运维手册。
+- [einat/README.md](einat/README.md)：随 DPD 发布的 full-cone NAT 二进制。
+- [honk/README.md](honk/README.md)：honk p1 core（direct 流交还经典 TC 链）。
