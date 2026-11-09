@@ -15,14 +15,18 @@
 - [ ] CI：shellcheck + BPF 对象 + ABI
 - [ ] `dpd-fw` feed 接入固件仓库
 
-## P1 — 一次查表
+## P1 — 一次查表 / Flow Manager
 
-- [ ] `dpd-flowd` 骨架：conntrack/honk/einat 事件
-- [ ] UFS key/value 定稿
+- [x] `dpdfwd` MVP：link/addr/route/neigh 事件 → 去抖 epoch bump；conntrack
+      计数；`/var/run/dpd/flowd.json`（ESXi 实测 epoch 0→1、ct_new 增长）
+- [ ] 按流定向失效（需要 ct_cookie ↔ UFS key 映射）
+- [ ] UFS key/value 定稿（当前 48B/28B，缺 NAT 结果/DSCP/action/计数器）
 - [x] L2/L3 双 BPF section，去掉每包 `dpd_iface` 查询
-- [x] 网桥端口自动 attach/detach（ESXi 实测：br-lan ingress 看不到转发帧）
-- [ ] 配置移出热路径
-- [ ] `accel_after_pkts`（默认 32）
+- [x] 网桥端口自动 attach/detach
+- [x] 配置移出热路径（per-CPU cfg 块，一次查表）
+- [x] `accel_after_pkts`（默认 32；短流不进快路径，实测 flow_hit=0）
+- [x] FIN/RST 立即释放（`ST_FLOW_FIN`）
+- [x] TCP 300s / UDP 120s / 单向 UDP 30s 超时
 - [ ] 命中路径只更新 2 个 per-CPU 计数
 - [ ] PPPoE emit A/B：`pull_data + redirect` vs `redirect_neigh(nh)`
 

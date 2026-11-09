@@ -2,30 +2,42 @@
 
 Control-plane daemon for DPD-FW.
 
-## Responsibilities
+## Implemented (MVP)
 
-- Subscribe to:
-  - conntrack events (new/destroy/update),
-  - honk ubus state,
-  - einat binding events,
-  - ACL/QoS/MWAN config changes,
-  - netlink link/route/neighbour events.
-- Maintain the flow state machine:
-  `NEW -> OBSERVE(accel_after_pkts) -> BIND -> FIN`.
-- Install/refresh/expire UFS entries through `libdpd`.
-- Apply classifier plugins (`dpd-acl`, `dpd-qos`, `dpd-mwan`, `dpd-honk`).
-- Publish gate/status/telemetry.
+- Subscribes to rtnetlink **link / IPv4 address / IPv4 route / neighbour**
+  events. A burst of events is coalesced (300 ms) into **one** flow-cache
+  epoch bump (`dpdctl bump`), which invalidates every cached egress decision
+  without walking the flow table.
+- Subscribes to **conntrack** new / update / destroy events (NETLINK_NETFILTER,
+  CTNETLINK groups) and keeps per-type counters. This is the hook for a future
+  per-flow delete; it never blocks or drops anything.
+- Publishes `/var/run/dpd/flowd.json` every 2 s:
 
-## Design notes
+  ```json
+  { "uptime": 42, "link": 1, "addr": 1, "route": 2, "neigh": 0,
+    "ct_new": 12, "ct_update": 8, "ct_destroy": 10,
+    "epoch_bumps": 2, "unknown": 0, "errors": 0, "last_event": 1700000000 }
+  ```
 
-- Simple direct flows may be learned in BPF; `dpdfwd` handles complex flows
-  (NAT/full-cone/MWAN/proxy) and policy.
-- A flow is not accelerated until `accel_after_pkts` (default 32) are observed,
-  so short flows stay on the stack.
-- Topology/policy changes bump an epoch; stale UFS entries are ignored.
-- The daemon must be restartable without dropping the dataplane: UFS entries
-  survive, `dpdfwd` repopulates metadata.
+- `--dry-run` counts without calling `dpdctl`; `--once` exits after the first
+  debounced bump (used by tests).
 
-## Status
+## Split with the dataplane
 
-Scaffold (P0). Implementation lands in P1.
+- The BPF program owns the direct flow lifecycle: learn on miss,
+  `accel_after_pkts`, FIN/RST release, per-protocol TTL, epoch validation.
+  `dpdfwd` never touches a packet and is not in the fast path.
+- `dpdfwd` owns the environment: a link/route/neighbour change invalidates the
+  cache in one place, even when the change did not come through a hotplug
+  script (operator `ip route`, tunnel, carrier flap).
+
+## Not yet implemented
+
+- Targeted (per-flow) invalidation on conntrack destroy: the UFS key contains
+  the ingress ifindex, which the conntrack message does not carry. A flow
+  cookie map (ct_cookie ↔ UFS key) is the next step; until then entries expire
+  by TTL or by the epoch.
+- `accel_after_pkts` / TTL policy decisions: the daemon publishes nothing into
+  `dpd_cfg` today; the values come from UCI via the datapath init script.
+- Plugin classification (ACL/QoS/MWAN/honk) is still done by the individual
+  packages; there is no plugin registration ABI yet.

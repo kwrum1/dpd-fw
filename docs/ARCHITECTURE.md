@@ -601,6 +601,33 @@ DPD 作为 bridge port 也 attach 到 `vbr`，路径与真实 LAN 客户端一�
 通过 procd 注入规则关掉 masq，gate 也只在 einat 确认挂在上行时才置
 `nat_offload`，所以这是误配置而非常态。
 
+### P1 Flow Manager（ABI 17，已实现 MVP）
+
+数据面仍然由 BPF 学习直连流，`dpdfwd` 只做控制面事件；两者分工如下：
+
+- **`accel_after_pkts`（默认 32）**：新方向的前 32 个包继续走栈，短流完全不进
+  快路径。计数器从 8 位缩到 7 位（bit 15 留给 `DPD_FLOW_F_REPLY`）。
+- **FIN/RST 立即释放**：命中路径检查 TCP flags，FIN/RST 时删除该方向 UFS
+  条目并交回栈，计 `ST_FLOW_FIN`；不再等 TTL。
+- **协议对齐超时**：TCP 300s、双向 UDP 120s、单向 UDP 30s。UDP “是否双向”
+  在学习时查一次反向 key，置 `DPD_FLOW_F_REPLY`；命中路径不额外查表。
+- **`dpdfwd`（新包）**：订阅 rtnetlink 的 link/addr/route/neigh 事件，300ms
+  去抖后只调用一次 `dpdctl bump`；同时订阅 conntrack new/update/destroy 做
+  计数，输出 `/var/run/dpd/flowd.json`。数据面不依赖它，daemon 崩溃不影响转发。
+
+ESXi（ABI 17）验证：
+
+| 场景 | 结果 |
+|---|---|
+| 短流（一个 JSON 请求） | `flow_hit` 不增长（32 包门限生效），`flow_fin` +1 |
+| 32MB 下载 | 0.61s，`flow_hit=3994`，`flow_fin` +2，`nat_gone=0` |
+| 路由增删 | `epoch 0→1`，`epoch_bumps=1`（两次事件合并成一次） |
+| 一次 TCP 请求 | `flowd.json` `ct_new=6` |
+
+还没做：按流定向失效（UFS key 带 ifindex，conntrack 消息没有，需要
+cookie 映射）、UDP 自适应的真机/双 peer 验证、把 `accel_after`/TTL 由
+`dpdfwd` 动态决策（现在由 UCI 静态下发）。
+
 ### P3 / P4
 
 - P3：`dpd-acl`/`dpd-qos`/`dpd-mwan` meta 包已加入包集，底层仍是
