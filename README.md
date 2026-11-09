@@ -40,6 +40,15 @@ dpd-napi (system layer)
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 
+## Documentation
+
+- [DPD-FW 技术说明（中文）](docs/DPD-GUIDE.zh-CN.md) /
+  [Technical Guide (English)](docs/DPD-GUIDE.en.md): architecture, packet path,
+  flow lifecycle, NAT ownership, honk/PPE coexistence, NAPI, observability,
+  build and operations.
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md): the original design notes.
+- [OPERATIONS.md](docs/OPERATIONS.md): runbook.
+
 ## Packages
 
 | Package | Purpose |
