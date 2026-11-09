@@ -78,18 +78,26 @@ jobs:
 
       - name: Compile every bpf source for the BPF target
         run: |
-          set -eu
-          multiarch=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
-          git ls-files 'bpf/**/*.bpf.c' > /tmp/bpf-sources
-          test -s /tmp/bpf-sources
-          while IFS= read -r src; do
-            dir=$(dirname "$src")
-            out="/tmp/$(basename "$src" .c).o"
-            echo "clang -target bpf: $src -> $out"
-            clang -target bpf -O2 -g -DDPD_MODE_DEFAULT=1 \
-              -I "$dir" -I /usr/include -I "/usr/include/$multiarch" \
-              -c "$src" -o "$out"
-          done < /tmp/bpf-sources
+          set -uo pipefail
+          {
+            multiarch=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
+            git ls-files 'bpf/**/*.bpf.c' > /tmp/bpf-sources
+            test -s /tmp/bpf-sources
+            while IFS= read -r src; do
+              dir=$(dirname "$src")
+              out="/tmp/$(basename "$src" .c).o"
+              echo "clang -target bpf: $src -> $out"
+              clang -target bpf -O2 -g -DDPD_MODE_DEFAULT=1 \
+                -D__KERNEL__ -D__BPF_TRACING__ \
+                -I "$dir" -I /usr/include -I "/usr/include/$multiarch" \
+                -c "$src" -o "$out"
+            done < /tmp/bpf-sources
+          } 2>&1 | tee /tmp/bpf.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            { echo '### bpf compile failed'; echo '```'; tail -60 /tmp/bpf.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
 
       - name: Core object has the classifier/l2 and classifier/l3 sections
         run: |

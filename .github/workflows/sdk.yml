@@ -107,7 +107,11 @@ jobs:
         run: |
           set -uo pipefail
           cd sdk
-          make defconfig >/tmp/defconfig.log 2>&1 || { tail -40 /tmp/defconfig.log; exit 1; }
+          if ! make defconfig >/tmp/defconfig.log 2>&1; then
+            tail -40 /tmp/defconfig.log
+            { echo '### defconfig failed'; echo '```'; tail -40 /tmp/defconfig.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           # A fresh SDK has no libc/libgcc metadata: package-pack.mk checks each
           # package's DT_NEEDED against the provides files of its implicit deps,
           # finds nothing, and refuses to create the apk. Seed the two SONAMEs.
@@ -138,6 +142,7 @@ jobs:
             else
               echo "::error::package $name failed"
               tail -80 "/tmp/build-$name.log"
+              { echo "### $name failed"; echo '```'; tail -60 "/tmp/build-$name.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
               fail=1
             fi
             echo "::endgroup::"
