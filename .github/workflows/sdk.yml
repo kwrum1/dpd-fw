@@ -114,7 +114,7 @@ jobs:
           target=$(ls -d staging_dir/target-* 2>/dev/null | head -1)
           if [ -z "$target" ]; then
             make -C package/dpdfwd TOPDIR="$PWD" BUILD_SUBDIR=package/dpdfwd \
-              BUILD_VARIANT= ALL_VARIANTS= prepare >/dev/null 2>&1 || true
+              BUILD_VARIANT= ALL_VARIANTS= CONFIG_PACKAGE_dpdfwd=m prepare >/dev/null 2>&1 || true
             target=$(ls -d staging_dir/target-* 2>/dev/null | head -1)
           fi
           echo "target dir: ${target:-none}"
@@ -122,41 +122,51 @@ jobs:
           printf 'libc.so\nlibgcc_s.so.1\n' > "$target/pkginfo/libc.provides"
           printf 'libgcc_s.so.1\n' > "$target/pkginfo/libgcc.provides"
 
+          # The package is only built when it is enabled; defconfig does not
+          # always select local packages, so pass the symbol on the command
+          # line (it wins over .config). Signature is off: a fresh SDK has no
+          # private-key.pem.
           fail=0
-          for p in dpdfwd dpd-napi luci-app-ebpf router-dataplane; do
-            echo "::group::$p"
-            if make -C "package/$p" TOPDIR="$PWD" \
-              BUILD_SUBDIR="package/$p" BUILD_VARIANT= ALL_VARIANTS= \
-              compile CONFIG_SIGN_EACH_PACKAGE= \
+          while read -r dir name; do
+            echo "::group::$name"
+            if make -C "package/$dir" TOPDIR="$PWD" \
+              BUILD_SUBDIR="package/$dir" BUILD_VARIANT= ALL_VARIANTS= \
+              compile CONFIG_PACKAGE_"$name"=m CONFIG_SIGN_EACH_PACKAGE= \
               CLANG=clang BPF_DEPENDS= DPD_BPF_INCLUDES=-I/usr/include \
-              > "/tmp/build-$p.log" 2>&1; then
-              echo "ok: $p"
+              > "/tmp/build-$name.log" 2>&1; then
+              echo "ok: $name"
             else
-              echo "::error::package $p failed"
-              tail -80 "/tmp/build-$p.log"
+              echo "::error::package $name failed"
+              tail -80 "/tmp/build-$name.log"
               fail=1
             fi
             echo "::endgroup::"
-          done
+          done <<'EOF'
+          dpdfwd dpdfwd
+          dpd-napi dpd-napi
+          luci-app-ebpf luci-app-ebpf
+          router-dataplane dpd-fastpath
+          EOF
           exit "$fail"
 
-      - name: Verify the apks
+      - name: Collect the apks
         run: |
           set -euo pipefail
-          cd sdk
-          ls -l bin/packages/*/base/
+          mkdir -p out
+          find sdk/bin -name '*.apk' -exec cp -f {} out/ \;
+          ls -l out/
           for p in dpdfwd dpd-fastpath dpd-napi luci-app-ebpf; do
-            compgen -G "bin/packages/*/base/${p}-*.apk" >/dev/null \
+            compgen -G "out/${p}-*.apk" >/dev/null \
               || { echo "!! missing apk: $p" >&2; exit 1; }
           done
           # The datapath package must actually contain the compiled object.
-          apk=$(ls bin/packages/*/base/dpd-fastpath-*.apk)
-          tar -tzf "$apk" 2>/dev/null | grep -E 'lib/bpf/dpd_fastpath\.bpf\.o|usr/sbin/dpdctl' \
-            || { echo "!! $apk has no dpd_fastpath.bpf.o / dpdctl" >&2; exit 1; }
+          tar -tzf out/dpd-fastpath-*.apk 2>/dev/null |
+            grep -E 'lib/bpf/dpd_fastpath\.bpf\.o|usr/sbin/dpdctl' \
+            || { echo "!! dpd-fastpath has no bpf object / dpdctl" >&2; exit 1; }
 
       - name: Upload apks
         uses: actions/upload-artifact@v4
         with:
           name: sdk-${{ matrix.name }}
-          path: sdk/bin/packages/*/base/*.apk
+          path: out/*.apk
           if-no-files-found: error
