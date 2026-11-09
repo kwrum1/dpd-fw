@@ -129,3 +129,17 @@ VM 配置不变。
 小包以建连/prime 为主（`accel_after=32`，短流按设计不进快路径）；32MB 上传
 字节数精确（16777216 / 33554432，peer 198.18.0.1:26631/29397），未单独计时。
 该数字受 ESXi 虚链路和 ly-route 的 HTTP 服务限制，不是 1G/10G 门禁数据。
+
+## 2026-11-09 晚：ABI 20 增量全量镜像
+
+在同一个树里把 `bpf/core`、`dpdfwd`、`dpd-einat-sync` 换成本轮源码后，
+先单独编译三个包（全部通过，对象里确认有 `classifier/egress`），再做增量
+`make -j8`：
+
+- 产物：`immortalwrt-x86-64-generic-squashfs-combined.img.gz`（53,237,536 字节）；
+- sha256 `cf7e475ab5cc46533e0e040e92d64987f72620219b6c0c514560a9c8c5cc0dbe`；
+- 已包含 ABI 20（`dpd_iface.addr4`、`dpd_nat_rev.ts_ms`、
+  `classifier/egress`、`nat_forward`/`nat_port_*` UCI、`dpdctl nat_addr|nat`、
+  `dpdfwd` 的 `/etc/dpd/class.conf`）；
+- **尚未刷入**：实验室当前跑的是上一版镜像 + 热替换的 ABI 20 对象/二进制。
+  下次刷机会用这个文件（先 `sha256sum` 校验，再 `sysupgrade -n`）。
