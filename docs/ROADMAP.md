@@ -5,7 +5,7 @@
 | 阶段 | 复选框 | 完成度 | 主要缺口 |
 |---|---|---|---|
 | P0 | 12/13 | 92% | feed 接入 |
-| P1 | 9/12 | 75% | 按流定向失效、PPPoE A/B、Flow Manager 事件驱动 |
+| P1 | 10/12 | 83% | PPPoE A/B、Flow Manager 分类决策 |
 | P2 | 2/5 | 40% | EIF、IPv6、`bpf_ct_*` |
 | P3 | 5/5 | 100% | ACL/QoS 分类器接入 dpd_class（机制已就绪） |
 | P4 | 4/8 | 50% | threaded/IRQ A/B、GRO/GSO A/B、qdisc 门禁、10G/64B 门禁 |
@@ -13,7 +13,7 @@
 | P6 | 0/2 | 0% | 可选 |
 | P7 | 1/6 | 17% | 仅调研，实现已挂起 |
 
-- 按 P0–P5 复选框加权：**约 71%**；
+- 按 P0–P5 复选框加权：**约 73%**；
 - 按设计文档的“能力”口径：**约 55–60%**（UFS 全量字段、Flow Manager 状态机、
   插件 ABI、full-cone/IPv6、性能门禁仍未完成）；
 - 性能验证：**约 10–15%**（只做了 payload 扫描，没有 64B PPS/10G 门禁）。
@@ -38,7 +38,9 @@
 
 - [x] `dpdfwd` MVP：link/addr/route/neigh 事件 → 去抖 epoch bump；conntrack
       计数；`/var/run/dpd/flowd.json`（ESXi 实测 epoch 0→1、ct_new 增长）
-- [ ] 按流定向失效（需要 ct_cookie ↔ UFS key 映射）
+- [x] 按流定向失效：`dpdfwd` 解析 conntrack destroy 的 orig/reply tuple，
+      每秒批量调用一次 `dpdctl delete -f`（一次扫描删所有匹配项）；
+      实测一次批量删除 8 条回程流
 - [x] UFS v2（ABI 18）：state/action/skb_priority/ct_cookie/nat_flags/dscp/
       packets/bytes；显式 OBSERVE→BIND 状态机
 - [x] `dpd_class` 策略缓存 + `dpdctl class`（端口 0/ifindex 0 通配；

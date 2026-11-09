@@ -639,8 +639,12 @@ cookie 映射）、UDP 自适应的真机/双 peer 验证、把 `accel_after`/TT
   `dpdctl flows` 显示 state/action/priority/dscp/pkt/bytes。
 - 实测（ABI 18）：eth1 回程 block 规则令 wget 超时（FAIL）；`class flush`
   后恢复 OK；命中路径的 action 门禁生效。
-- 仍归 einat/栈所有的：NAT 翻译结果（UFS 不缓存，P2.2）、按流定向失效
-  （ct cookie 映射）、ACL/QoS 的真实分类器（`dpd_class` 已提供机制）。
+- **按流定向失效已落地**：`dpdfwd` 解析 ctnetlink DESTROY 的 orig/reply
+  5-tuple，攒批后每秒调用一次 `dpdctl delete -f`；后者扫一遍 UFS 并按
+  通配 5-tuple 删除。实测一次批量删除 8 条回程流。这样 conntrack 已经
+  消失的流不会在 UFS 里留到 TTL。
+- 仍归 einat/栈所有的：NAT 翻译结果（UFS 不缓存，P2.2）、
+  ACL/QoS 的真实分类器（`dpd_class` 已提供机制）。
 
 ### P3 / P4
 
