@@ -62,7 +62,42 @@ The service run writes:
   "netdev_genl": true, "devices": " br-lan dummy0 eth0 eth1 eth2 teql0 vbr" }
 ```
 
+### IRQ affinity, GRO/GSO and qdisc helpers
+
+Three companion scripts ship with the package (all no-ops unless their UCI
+knob says otherwise):
+
+- `dpd-napi-irq --cpus 2-3 [--dev eth1 ...] [--dry-run]`: maps each NAPI's
+  IRQ to `smp_affinity_list`, using the netdev list first, then
+  `device/msi_irqs`, then `/proc/interrupts`; writes `irq.json`.
+- `dpd-napi-gro [--gro on|off|keep] [--gso ...] [--tso ...] [--dry-run]`:
+  `ethtool -K` A/B with a JSON dump of every feature; the daemon only
+  records the boot state by default.
+- `dpd-napi-qdisc --mode keep|off|cake|hybrid [--force]`: `keep` only
+  records; `off` installs noqueue (mq fallback), `cake` a root CAKE, and
+  `hybrid` combines LAN noqueue with WAN CAKE. A foreign root qdisc is
+  never replaced without `--force`.
+
+`napi.json`, `irq.json`, `gro.json` and `qdisc.json` are written under
+`/var/run/dpd/`.
+
+### Bench harness
+
+`tests/netns/{setup,teardown,run}.sh` build a client/server pair of network
+namespaces (client veth in br-lan, server on a test uplink) and run
+`ping`/`tcp-download`/`tcp-upload`/`udp`/`full-cone`/`nat-recreate` as CSV.
+`tests/bench/{matrix,sample,compare}.sh` drive the 64/128/512/1500/9000 B ×
+1/10/100/1000 flow matrix, sample `/proc/net/dev` + `dpdctl stats` +
+`napi.json` + `/proc/interrupts`, and diff two runs into a Markdown table.
+The scripts are syntax-checked but **not executed on the lab yet** (they
+create their own namespaces and firewall zone, which needs a dedicated
+session).
+
 ## Notes
+
+- The JSON helpers source `jshn.sh`, which reads `JSON_PREFIX` before
+  assigning it; `set -u` therefore breaks them at runtime. The three helpers
+  keep the default shell options on purpose (measured on the target).
 
 - Two UAPI details cost real time while bringing this up: `CTRL_ATTR_FAMILY_ID`
   is a **u16** (not u32), and `NAPI_GET`/`NAPI_SET` are commands **11/14**
