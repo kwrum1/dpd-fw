@@ -10,10 +10,11 @@
 - [x] 迁移 `router-tuning` → `plugins/dpd-tuning`
 - [x] 迁移 `luci-app-ebpf` → `openwrt/luci-app-dpd`
 - [x] 生成选型与架构设计 Word 文档
-- [ ] 6.18 config fragment
-- [ ] ESXi 基线（router-lab / ebpf-client2）
-- [ ] CI：shellcheck + BPF 对象 + ABI
-- [ ] `dpd-fw` feed 接入固件仓库
+- [x] 6.18 config fragment（`kernel/configs/6.18/dpd.config`）
+- [x] ESXi 基线（netns 客户端；见 `docs/ARCHITECTURE.md` §15）
+- [x] CI：shellcheck + BPF 对象 + ABI（`.github/workflows/ci.yml`）
+- [x] 本地完整镜像构建 + sysupgrade 刷机复验（`docs/LOCAL-BUILD.md`）
+- [ ] `dpd-fw` feed 接入固件仓库（目前是 `Scripts/Packages.sh` 直拷）
 
 ## P1 — 一次查表 / Flow Manager
 
