@@ -57,9 +57,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 
 ## Build
 
-The OpenWrt package makefiles live under `openwrt/package/` once P0 migration
-is complete. Until then, the P0 tree is a source scaffold and the original
-package makefiles are kept under each component directory.
+The OpenWrt packages live under `openwrt/` (LuCI), `userspace/*`, `plugins/*`
+and `bpf/core`; the image/package build runs in
+`kwrum1/ebpf-honk-ImmortalWRT-CI`, which vendors this tree under `ebpf/`. The
+feed layout is documented in `openwrt/feed/README.md`.
 
 ```sh
 # host-side syntax checks (no shellcheck needed)
