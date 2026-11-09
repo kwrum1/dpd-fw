@@ -34,8 +34,19 @@ jobs:
         run: |
           set -eu
           # OpenWrt shell (busybox ash + /etc/rc.common), not portable POSIX sh.
-          # Excluded by design: SC2034 SC2096 SC2120 SC2155 SC2218 SC3043.
-          exclude='SC2034,SC2096,SC2120,SC2155,SC2218,SC3043'
+          # Excluded by design:
+          #   SC2034  variables consumed by another script or by rc.common
+          #   SC2096  the init-script shebang "#!/bin/sh /etc/rc.common"
+          #   SC2120  helpers take optional args and are called both ways
+          #   SC2155  "local x=$(...)" is the ash idiom used in ebpf-mwan
+          #   SC2218  functions are defined for runtime dispatch
+          #   SC3043  `local` itself (an ash extension)
+          #   SC2154  uci-injected variables (config_load/option_get)
+          #   SC1007  "CDPATH= cd ..." (deliberate empty-prefix assignment)
+          #   SC2046  intentional word splitting: `set -- $(read_cpu)`
+          #   SC2100  false positive on string values like `code=mode-off`
+          #   SC2209  `interp=sh` holds a command name on purpose
+          exclude='SC2034,SC2096,SC2120,SC2155,SC2218,SC3043,SC2154,SC1007,SC2046,SC2100,SC2209'
           list=$(mktemp)
           trap 'rm -f "$list"' EXIT HUP INT TERM
           git ls-files '*.sh' >>"$list"
