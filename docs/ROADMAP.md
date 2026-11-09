@@ -72,3 +72,13 @@
 
 - [ ] `dpd-knod` GPU provider（AMD RDNA2 + XDP + 支持 NIC）
 - [ ] NPU/GPU 仅控制面分析
+
+## P7 — 高通 PPE/NSS 回退（调研完成，待实现）
+
+- [x] 调研：NSS/ECM、软件 flowtable、MTK PPE 的卸载边界与 UDP 失败原因
+      （`docs/RESEARCH-PPE-FALLBACK.md`）
+- [ ] P7.0 `dpdfwd` 解析 `CTA_STATUS` 的 OFFLOAD/HW_OFFLOAD + `dpd_ppe` map
+- [ ] P7.0 DPD 命中门禁 `ppe_fallback=off|udp|all` + `ppe_grace_ms`
+- [ ] P7.1 IPQ 上 ECM 加速模式/异常路径推断
+- [ ] P7.2 内核回调/BPF map 精确化
+- [ ] P7.3 上行 NAT 映射同步

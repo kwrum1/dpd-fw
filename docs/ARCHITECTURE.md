@@ -643,7 +643,29 @@ cookie 映射）、UDP 自适应的真机/双 peer 验证、把 `accel_after`/TT
     工具全量 dump 后在用户态过滤。
   - threaded NAPI 在 vmxnet3 上不生效（驱动未 opt-in），需要真机 A/B。
 
-## 16. 参考
+## 16. 高通 PPE/NSS 回退耦合（调研，2026-11-09）
+
+调研结论：DPD 可以作为 **NSS 硬件卸载失败时的软件回退**，但只能定位为
+“NSS 异常路径上的补充”，不能做成第二个 flowtable。详细分析见
+`docs/RESEARCH-PPE-FALLBACK.md`，要点：
+
+- NSS 卸载成功的包不再进入 Linux/TC；回到 TC 的本就是 NSS 没接住的流，
+  因此 TC eBPF 天然是回退点。
+- 判定“卸载失败”有三种信号：
+  1. conntrack `CTA_STATUS` 的 `IPS_OFFLOAD`（bit14）/`IPS_HW_OFFLOAD`（bit15），
+     适用软件 flowtable 与 MTK PPE；
+  2. Qualcomm ECM 的 `ecm_front_end_acceleration_modes`（`< 0` 即永久失败：
+     DENIED/RULE/DRIVER/ACCEL_ENGINE/NO_ACTION/DECEL/DEFUNCT）；
+  3. 异常路径推断：grace 窗口后同一流仍有包到达 TC ⇒ 未被卸载。
+- 方案：`dpdfwd` 维护 `dpd_ppe` map（UNKNOWN/OFFLOADED/FAILED/DENIED），
+  DPD 命中路径只读；`ppe_fallback=udp|all|off` + `ppe_grace_ms`。
+  UDP 是硬件失败率最高的部分，默认只回退 UDP，TCP 继续交给 NSS。
+- NAT：IPQ 上 NAT 归 NSS/conntrack，`nat_offload=0`，DPD 不接管上行，只加速
+  回程；上行加速需要 NAT 映射同步（P7.3）。
+- 实施顺序：x86 用软件 flowtable 验证检测逻辑 → IPQ 用 ECM/推断做实机 →
+  内核 `flow_block` 回调做精确化。
+
+## 17. 参考
 
 - Qualcomm NSS/ECM: https://github.com/qosmio/nss-packages
 - MediaTek PPE: https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mediatek/mtk_ppe_offload.c
