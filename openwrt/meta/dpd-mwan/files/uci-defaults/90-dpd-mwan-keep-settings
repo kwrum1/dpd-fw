@@ -1,0 +1,60 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# 90-dpd-mwan-keep-settings - keep the existing ebpf_mwan config in place.
+#
+# dpd-mwan is only a meta package: dpd-fastpath owns /etc/config/ebpf_mwan
+# and that UCI name is kept on purpose.  An in-place upgrade must not migrate,
+# rename or rewrite the user's configuration.  This script only records that
+# the legacy file was seen and refreshes the keep-settings baseline.
+
+PKG=dpd-mwan
+IMPL=dpd-fastpath
+CFG=/etc/config/ebpf_mwan
+MARKER_DIR=/etc/dpd/keep-settings
+MARKER=$MARKER_DIR/dpd-mwan.ebpf_mwan
+HELPER=/usr/lib/dpd/keep-settings.sh
+
+log() {
+	if command -v logger >/dev/null 2>&1; then
+		logger -t dpd "$*"
+	fi
+}
+
+mark() {
+	mkdir -p "$MARKER_DIR" 2>/dev/null || return 1
+	{
+		printf 'package=%s\n' "$PKG"
+		printf 'implementation=%s\n' "$IMPL"
+		printf 'config=%s\n' "$CFG"
+		printf 'status=kept\n'
+	} > "$MARKER.tmp" || return 1
+	mv "$MARKER.tmp" "$MARKER"
+}
+
+if [ -e "$CFG" ]; then
+	# The file is a conffile of dpd-fastpath.  Read it, never write it.
+	if [ ! -f "$MARKER" ] || ! grep -Fqx "config=$CFG" "$MARKER" 2>/dev/null; then
+		mark || log "$PKG: could not write $MARKER"
+	fi
+	log "$PKG: keeping legacy UCI $CFG (implementation $IMPL)"
+
+	if [ -x "$HELPER" ]; then
+		if "$HELPER" check >/dev/null 2>&1; then
+			"$HELPER" snapshot >/dev/null 2>&1 || true
+		else
+			log "$PKG: keep-settings check failed, a protected config is missing"
+		fi
+	fi
+else
+	# The implementation config is absent.  If an older spelling is still
+	# around, leave it alone: this script must not create or move config.
+	for old in /etc/config/dpd_mwan /etc/config/mwan; do
+		if [ -e "$old" ]; then
+			log "$PKG: legacy $old found, leaving it untouched"
+			break
+		fi
+	done
+fi
+
+exit 0

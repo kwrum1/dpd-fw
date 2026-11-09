@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=dpd-qos
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=GPL-2.0-only
 PKG_MAINTAINER:=kwrum1
 
@@ -27,6 +27,10 @@ endef
 
 define Package/dpd-qos/install
 	$(INSTALL_DIR) $(1)/usr/share/dpd
+	$(INSTALL_DIR) $(1)/usr/lib/dpd
+	$(INSTALL_BIN) ../files/keep-settings.sh $(1)/usr/lib/dpd/keep-settings.sh
+	$(INSTALL_DIR) $(1)/etc/uci-defaults
+	$(INSTALL_BIN) ./files/uci-defaults/90-dpd-qos-keep-settings $(1)/etc/uci-defaults/90-dpd-qos-keep-settings
 endef
 
 $(eval $(call BuildPackage,dpd-qos))
