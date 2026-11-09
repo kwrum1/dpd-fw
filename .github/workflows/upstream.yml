@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 kwrum1
+#
+# upstream: do the patches still apply to the pinned upstream trees?
+#
+# Both patch sets are anchor-based on purpose: an upstream rename makes them
+# stop matching, and a silent no-op would ship an unpatched core or an
+# unpatched einat. This job clones the pins and applies the patches in a
+# throwaway tree (no build), so drift is reported the next morning instead of
+# in a 90-minute image build.
+
+name: upstream
+
+on:
+  schedule:
+    - cron: 15 18 * * *
+  workflow_dispatch:
+  push:
+    paths:
+      - 'einat/patches/**'
+      - 'honk/patches/**'
+      - '.github/workflows/upstream.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  einat:
+    name: einat patches (${{ env.EINAT_COMMIT }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load pins
+        run: grep -v '^#' einat/pins.env | sed '/^$/d' >> "$GITHUB_ENV"
+
+      - name: Clone and patch
+        run: |
+          git clone "$EINAT_REPO" src
+          git -C src checkout "$EINAT_COMMIT"
+          python3 einat/patches/einat-perf.py src
+          python3 einat/patches/einat-perf-p2.py src
+          git -C src diff --stat
+
+  honk-core:
+    name: honk core patch (${{ env.CORE_COMMIT }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Load pins
+        run: grep -v '^#' honk/pins.env | sed '/^$/d' >> "$GITHUB_ENV"
+
+      - name: Clone and patch
+        run: |
+          git clone "$CORE_REPOSITORY" src
+          git -C src checkout "$CORE_COMMIT"
+          git -C src apply --check honk/patches/honk-core-config-validate.patch
+          git -C src apply honk/patches/honk-core-config-validate.patch
+          python3 honk/patches/honk-direct-unspec.py src
+          git -C src diff --stat

@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  schedule:
+    # Weekly sanity run even when nothing is pushed (replaces the old
+    # firmware-repo BPF-CHECK): compiles the datapath and dpdctl.
+    - cron: 0 18 * * 0
 
 permissions:
   contents: read

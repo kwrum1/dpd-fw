@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2026 kwrum1
+#
+# honk-core: build the p1 honk core (direct-classified flows handed back to the
+# classic TC chain) and publish it under the fixed tag `core-p1`.
+#
+# Why it lives here: the handover is a dataplane property, not a firmware one.
+# The firmware only downloads the resulting archive; IPQ/MTK images keep the
+# stock upstream core and never touch this.
+#
+# One job, all architectures: build-core.sh writes a single generated-stage.mk
+# with the per-arch asset names and hashes. Splitting into a matrix would have
+# each job overwrite that manifest with only its own arch.
+
+name: honk-core
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'honk/**'
+      - '.github/workflows/honk-core.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: honk-core
+  cancel-in-progress: false
+
+jobs:
+  core:
+    name: honk-core p1 (x86_64 + aarch64 + armv7)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: 0.14.1
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ripgrep zstd
+
+      - name: Build honk-core
+        run: bash honk/build-core.sh
+
+      - name: Publish core assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: core-p1
+          name: honk core p1 (direct flows returned as TC_ACT_UNSPEC)
+          prerelease: true
+          generate_release_notes: false
+          files: |
+            artifacts/cache/honk-core-*.tar.gz
+            artifacts/honk/generated-stage.mk
+            artifacts/honk/generated-provenance.json
