@@ -94,6 +94,23 @@ after : link=15 link_port=7  epoch_bumps=7
 2 次（DEL 时名字已消失的保守路径）。`flowd.json` 新增 `link_port`、
 `ct_offload`、`ct_hw_offload`，JSON 有效。
 
+### D. 本地投递快判（fib_fail）
+
+基线（100 个 ping 到 10.10.10.1）：`fib_fail +189`、`local +0`。
+安装后同一测试：`fib_fail +0`、`local +361`（请求+回复+本机流量）。
+
+实现：
+
+- `dpd_local` hash（family + 16 字节地址），miss 路径在 `bpf_fib_lookup()`
+  之前查；命中则 `ST_LOCAL++` 并返回 `TC_ACT_UNSPEC`，不再做 FIB；
+- `dpdctl local sync|flush|list` 从 `getifaddrs()` 填充（跳过 loopback，
+  包含 WAN/LAN/ULA/link-local）；
+- `dpdfwd` 在 `RTM_NEWADDR/DELADDR` 重新 sync（PPPoE 重拨会换地址）；
+- init 在 attach 后 sync 一次。
+
+现场 `local table 10/128`，`dpdctl local list` 能看到 WAN/LAN/ULA/link-local
+全部地址。代价是转发 miss 多一次小 hash 查表；本地流量不再产生 `fib_fail`。
+
 ### 未做
 
 - v4 游戏流/NAT 闸门（需要 NAT 归属决策，见 `RESEARCH-PPE-DUAL.md`）；
