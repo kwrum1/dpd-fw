@@ -78,42 +78,10 @@ jobs:
           # gnu/stubs.h takes the 32-bit branch and needs gnu/stubs-32.h.
           sudo apt-get install -y clang llvm gcc gcc-multilib libbpf-dev linux-libc-dev
 
-      - name: Compile every bpf source for the BPF target
-        run: |
-          set -uo pipefail
-          {
-            multiarch=$(gcc -print-multiarch 2>/dev/null || echo x86_64-linux-gnu)
-            git ls-files 'bpf/**/*.bpf.c' > /tmp/bpf-sources
-            test -s /tmp/bpf-sources
-            while IFS= read -r src; do
-              dir=$(dirname "$src")
-              out="/tmp/$(basename "$src" .c).o"
-              echo "clang -target bpf: $src -> $out"
-              clang -target bpf -O2 -g -DDPD_MODE_DEFAULT=1 \
-                -D__KERNEL__ -D__BPF_TRACING__ \
-                -I "$dir" -I /usr/include -I "/usr/include/$multiarch" \
-                -c "$src" -o "$out"
-            done < /tmp/bpf-sources
-          } 2>&1 | tee /tmp/bpf.log
-          rc=${PIPESTATUS[0]}
-          if [ "$rc" -ne 0 ]; then
-            { echo '### bpf compile failed'; echo '```'; tail -60 /tmp/bpf.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-            exit "$rc"
-          fi
-
-      - name: Core object has the classifier/l2 and classifier/l3 sections
-        run: |
-          set -eu
-          obj=/tmp/dpd_fastpath.bpf.o
-          test -f "$obj"
-          llvm-objdump -h "$obj"
-          for sec in classifier/l2 classifier/l3; do
-            if ! llvm-objdump -h "$obj" | awk '{print $2}' | grep -Fxq "$sec"; then
-              echo "missing section $sec in $obj"
-              exit 1
-            fi
-          done
-
+      # The BPF object itself is compiled by the `sdk` workflow, inside the
+      # ImmortalWrt SDK, i.e. against the same 6.18 UAPI the image uses. Doing
+      # it here against the runner's linux-libc-dev (6.8 on ubuntu-24.04) does
+      # not work: BPF_FIB_LOOKUP_SKIP_NEIGH/MARK do not exist there yet.
       - name: Compile dpdctl with -Wall -Werror
         run: |
           gcc -O2 -Wall -Werror -I bpf/core/src \
