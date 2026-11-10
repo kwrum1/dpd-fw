@@ -55,6 +55,8 @@
 #define OUT_FILE OUT_DIR "/flowd.json"
 #define DPD_CTL "/usr/sbin/dpdctl"
 #define CT_DELETE_FILE "/tmp/dpd-ct-delete"
+#define CT_PPE_FILE "/tmp/dpd-ct-ppe"
+#define CT_PPE_MAX 128
 #define DEBOUNCE_MS 300
 /* Neighbour churn: how long a *suspicious* one may wait before the epoch is
  * bumped, and the hard ceiling on how stale a cached MAC may get.
@@ -162,6 +164,17 @@ struct stats {
 	time_t started;
 	time_t last_event;
 };
+
+/* ABI 22: conntrack-offload state, batched like the delete list so the daemon
+ * forks dpdctl at most once a second instead of once per ctnetlink event. */
+struct ppe_pend {
+	struct ct_tuple t;
+	uint32_t state;
+};
+static struct ppe_pend ppe_pending[CT_PPE_MAX];
+static int ppe_pending_n;
+static int ppe_enabled = 1;	/* set from uci at startup */
+static unsigned long ppe_writes;
 
 static struct ct_tuple ct_pending[CT_PENDING_MAX];
 static int ct_pending_n;
@@ -432,6 +445,80 @@ static void ct_queue(struct nlmsghdr *h)
 
 /* One fork per second at most, not one per destroyed connection. dpdctl
  * scans the flow map once and deletes every key matching any of the tuples. */
+/*
+ * Map one CTA_STATUS to a dpd_ppe_state and queue it.
+ *
+ * Order matters: HW_OFFLOAD implies OFFLOAD, so test the hardware bit first.
+ * A flow with neither bit is one the kernel is *not* offloading, i.e. squarely
+ * DPD's business again -- recording SW_ACTIVE lets a flow come back to the
+ * datapath when the flowtable drops it (the kernel does that on route/link
+ * changes, exactly where DPD's epoch also moves).
+ */
+static void ppe_update(const struct ct_tuple *t, uint32_t status)
+{
+	uint32_t want;
+	int i;
+
+	if (status & IPS_HW_OFFLOAD)
+		want = DPD_PPE_OFFLOADED;
+	else if (status & IPS_OFFLOAD)
+		want = DPD_PPE_YIELDED;
+	else
+		want = DPD_PPE_SW_ACTIVE;
+
+	/* Collapse repeated reports of the same tuple: ctnetlink resends
+	 * CTA_STATUS on every update of a live connection. */
+	for (i = 0; i < ppe_pending_n; i++)
+		if (ppe_pending[i].state == want &&
+		    ppe_pending[i].t.family == t->family &&
+		    ppe_pending[i].t.proto == t->proto &&
+		    ppe_pending[i].t.sport == t->sport &&
+		    ppe_pending[i].t.dport == t->dport &&
+		    !memcmp(ppe_pending[i].t.saddr, t->saddr, 16) &&
+		    !memcmp(ppe_pending[i].t.daddr, t->daddr, 16))
+			return;
+
+	if (ppe_pending_n >= CT_PPE_MAX)
+		return;		/* next tick catches up */
+	ppe_pending[ppe_pending_n].t = *t;
+	ppe_pending[ppe_pending_n].state = want;
+	ppe_pending_n++;
+}
+
+/* One fork per tick, regardless of how many flows changed: the whole batch
+ * goes to a file and dpdctl applies it in one pass. Same shape as ct_flush()
+ * for the same reason -- a daemon must not fork per conntrack event. */
+static void ppe_flush(int dry)
+{
+	FILE *f;
+	int i;
+
+	if (!ppe_pending_n)
+		return;
+
+	f = fopen(CT_PPE_FILE, "w");
+	if (!f) {
+		ppe_pending_n = 0;
+		return;
+	}
+	for (i = 0; i < ppe_pending_n; i++) {
+		char sa[INET6_ADDRSTRLEN], da[INET6_ADDRSTRLEN];
+		const struct ct_tuple *t = &ppe_pending[i].t;
+
+		inet_ntop(t->family, t->saddr, sa, sizeof(sa));
+		inet_ntop(t->family, t->daddr, da, sizeof(da));
+		fprintf(f, "%u %s %u %s %u %s\n", ppe_pending[i].state,
+			t->proto == IPPROTO_UDP ? "udp" : "tcp",
+			t->sport, sa, t->dport, da);
+	}
+	fclose(f);
+
+	if (!dry &&
+	    system(DPD_CTL " flows ppe -f " CT_PPE_FILE " >/dev/null 2>&1") == 0)
+		ppe_writes += (unsigned long)ppe_pending_n;
+	ppe_pending_n = 0;
+}
+
 static void ct_flush(int dry)
 {
 	char sa[INET6_ADDRSTRLEN], da[INET6_ADDRSTRLEN];
@@ -1200,6 +1287,17 @@ static void ct_status(struct nlmsghdr *h, struct stats *st)
 		st->ct_offload++;
 	if (status & IPS_HW_OFFLOAD)
 		st->ct_hw_offload++;
+
+	/* ABI 22: feed the software/hardware handover. The original tuple names
+	 * the datapath entry; conntrack always carries it on a NEW/UPDATE. */
+	if (ppe_enabled) {
+		struct ct_tuple t;
+
+		memset(&t, 0, sizeof(t));
+		a = nla_find(attrs, len, CTA_TUPLE_ORIG);
+		if (a && !parse_tuple(a, &t))
+			ppe_update(&t, status);
+	}
 }
 
 static void ct_event(struct nlmsghdr *h, int ev, struct stats *st)
@@ -1276,7 +1374,7 @@ static void publish(struct stats *st)
 		" \"neigh\": %lu, \"neigh_ignored\": %lu,"
 		" \"neigh_forced\": %lu, \"ct_new\": %lu, \"ct_update\": %lu,"
 		" \"ct_destroy\": %lu, \"ct_offload\": %lu,"
-		" \"ct_hw_offload\": %lu, \"epoch_bumps\": %lu,"
+		" \"ct_hw_offload\": %lu, \"ppe_writes\": %lu, \"epoch_bumps\": %lu,"
 		" \"unknown\": %lu, \"errors\": %lu, \"ct_delete_batches\": %lu,"
 		" \"class_rules\": %lu, \"class_bad\": %lu,"
 		" \"class_applied_at\": %ld, \"class_error\": %lu,"
@@ -1288,7 +1386,8 @@ static void publish(struct stats *st)
 		(long)(time(NULL) - st->started), st->link, st->link_port,
 		st->addr, st->route, st->neigh, st->neigh_ignored,
 		st->neigh_forced, st->ct_new, st->ct_update,
-		st->ct_destroy, st->ct_offload, st->ct_hw_offload, st->bumps,
+		st->ct_destroy, st->ct_offload, st->ct_hw_offload, ppe_writes,
+		st->bumps,
 		st->unknown, st->errors,
 		ct_delete_batches, st->class_rules, st->class_bad,
 		(long)st->class_applied_at, st->class_error,
@@ -1528,6 +1627,7 @@ int main(int argc, char **argv)
 		}
 		if (time(NULL) != last_ct_flush) {
 			ct_flush(dry);
+			ppe_flush(dry);
 			last_ct_flush = time(NULL);
 		}
 		if (time(NULL) >= next_prune) {

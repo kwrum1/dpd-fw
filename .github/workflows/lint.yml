@@ -99,3 +99,9 @@ jobs:
 
       - name: ABI stamp, TC section names and counter names
         run: sh scripts/verify-abi.sh
+
+      # The software/hardware handover keeps enum dpd_ppe_state in two headers
+      # on purpose (dpdfwd must not include linux/bpf.h). This is the guard that
+      # keeps them identical; it also fails if the hit path stops consulting it.
+      - name: PPE state enum agrees across the control/data plane boundary
+        run: sh scripts/verify-ppe-abi.sh
