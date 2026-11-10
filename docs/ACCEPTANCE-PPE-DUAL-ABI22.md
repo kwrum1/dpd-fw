@@ -219,7 +219,50 @@ br-lan ports  = 3  (lan1/lan2/lan3)
 - 给 WAN 插网线拿到载波；
 - 指认一个可以临时拆出 `br-lan` 的空闲端口。
 
-## 8. 复现
+## 8. 进了镜像（这一条已闭环）
+
+ABI 22 不只是在设备上手工验证：它已经**打包进正式镜像**并核对过实际产物。
+
+构建：固件仓库 `0466df8` → `Auto-Clean` → 四个 workflow，全部 success：
+
+```
+QCA-PPE       4/4 jobs success   (IPQ60XX/807X × WIFI-NO/YES)
+QCA-NSS       4/4 jobs success
+EBPF-WRT-ALL  2/2 jobs success   (X86, ROCKCHIP)  <-- ABI 22 数据面在这里
+MTK-ALL       进行中
+```
+
+发布产物 `dpd-fw-wrt-X86-26.11.11-02.46.00`，从 release 里取出 manifest 和
+rootfs 核对：
+
+```
+=== manifest ===
+  dpd-fastpath - 0.1.0-r10        <- ABI 22 的版本号
+  dpdfwd       - 0.1.0-r9
+  einat-ebpf   - 0.1.11-r3
+  tc-bpf       - 7.3.0-r1
+
+=== rootfs (dpd-fw-wrt-x86-64-rootfs-none-...tar.gz) ===
+  *** /usr/lib/dpd/abi = 22                     <- 包内的 ABI 戳
+  *** lib/bpf/dpd_fastpath.bpf.o (311656 bytes)
+  *** usr/sbin/dpdctl  (44699 bytes)
+  *** usr/sbin/dpdfwd  (24635 bytes)
+  config: option ppe_mode 'off'
+  config: option ppe_grace_ms '0'
+```
+
+`/usr/lib/dpd/abi` 就是 `dpd_pins_compat()` 用来决定要不要丢弃旧 pinned map
+的那个文件；它等于 22，说明镜像里的数据面和用户态是同一版 ABI。
+
+两棵源码树也逐文件比对过（`cmp`），7 个文件**字节完全相同**：
+
+```
+OK dpd_common.h   OK dpd_fastpath.bpf.c   OK dpdctl.c
+OK dpdfwd.c       OK dpd_plugin.h
+OK dpd-fastpath.sh   OK dpd_fastpath.config
+```
+
+## 9. 复现
 
 ```sh
 # 数据面
