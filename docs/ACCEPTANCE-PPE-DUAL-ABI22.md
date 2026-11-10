@@ -1,0 +1,200 @@
+# 软硬双加速：ABI 22 协调层验收（2026-11-11）
+
+设备：太乙 `10.10.10.100`，ImmortalWRT SNAPSHOT `r0-5cd11f1`，
+`qualcommax/ipq60xx`，kernel 6.18.55，aarch64，2 GB RAM。
+经跳板机 `nas.tokisaki-kurumi.cc` 接入。
+
+本文只记录**本轮新增**的协调层（ABI 22）与其实测结果。DPD 数据面本身的
+首次上机验收见 `LAB-IPQ60XX-2026-11-11.md`。
+
+## 1. 这一轮补的是"缺失的那一层"
+
+上一轮修的是 `ppe-probe.sh` 的**识别** bug（它把 `qca-ppe` 误判成 NSS）。
+但 `RESEARCH-PPE-DUAL.md` 里描述的协调机制从来不存在：
+
+```
+dpd_ppe map           -> 不存在
+ppe_fallback          -> 不存在
+ppe_grace_ms          -> 不存在
+```
+
+`dpdfwd` 虽然早就在解析 conntrack 的 `IPS_OFFLOAD`/`IPS_HW_OFFLOAD`，
+但只用来**计数**，没有任何数据面影响。所以"双加速"当时只是一份设计文档。
+
+现在补上了。
+
+## 2. 设计：状态放在哪里，为什么不加成本
+
+协调必须**按流**做，而且不能给热路径加 lookup。做法是把状态塞进
+`dpd_flow_val.ct_cookie`——这个字段从 ABI 18 起就写着"留给可选的 bpf_ct
+路径"，但代码从未使用它。
+
+```c
+__u32 ct_cookie;   /* ABI 22: enum dpd_ppe_state */
+```
+
+结果：**`sizeof(struct dpd_flow_val)` 仍是 72 字节**，命中路径仍然只有
+一次 `dpd_flows` 查找。
+
+| 状态 | 含义 | 谁写 |
+|---|---|---|
+| `UNKNOWN` | 刚学到，还没人认领 | 数据面学习时 |
+| `SW_ACTIVE` | conntrack 说没人卸载 | dpdfwd |
+| `YIELDED` | 软件 flowtable 接管 | dpdfwd |
+| `OFFLOADED` | 硬件接管 | dpdfwd |
+| `FAILED` | 硬件试过但失败 | 运维/插件 |
+| `DENIED` | 硬件拒绝 | 运维/插件 |
+
+`FAILED`/`DENIED` 刻意**不由 dpdfwd 自动写**：conntrack 只能证明"有人接管了"，
+证明不了"硬件尝试失败"。把猜测写成证据会制造假状态，所以这两种由
+`dpdctl flows ppe failed|denied` 显式设置。
+
+## 3. 三种行为
+
+```
+ppe_mode=off     从不 yield（x86/RK 默认，那里没有这种硬件）
+ppe_mode=yield   OFFLOADED/YIELDED 时让路
+ppe_mode=dual    硬件优先；硬件 FAILED/DENIED 的流 DPD 收回
+```
+
+命中路径：
+
+```c
+static int dpd_ppe_yield(cfg, fval, age, st)
+{
+    if (cfg->ppe_mode == DPD_PPE_OFF) return 0;
+    switch (fval->ct_cookie) {
+    case OFFLOADED: case YIELDED:  -> ST_PPE_YIELD; return 1;   /* 让路 */
+    case FAILED:   case DENIED:    -> return cfg->ppe_mode == FALLBACK ? 0 : 1;
+    default: break;
+    }
+    if (cfg->ppe_grace_ms && age < cfg->ppe_grace_ms) {
+        ST_PPE_GRACE; return 1;                                 /* 等内核 */
+    }
+    return 0;
+}
+```
+
+## 4. 实测（真实 IPQ60xx）
+
+拓扑：两个独立的 veth 对，`dpdc ns --> dpdtest0 [DPD] dpdtest1 --> dpds ns`，
+iperf3 打流。
+
+### 4.1 yield：硬件拥有的流，数据面完全停止干预
+
+连接**在飞行中**被标记（iperf3 每次新建 5-tuple，必须在连接活着时标记，
+否则标的是旧流）：
+
+```
+ppe offloaded: 24 of 24 flow(s) updated
+--- 之后 4 秒，流仍在跑 ---
+ppe_yield:  94664 -> 174356     <- 数据面让路 79692 个包
+flow_hit : 351497 -> 351497     <- 命中计数完全冻结
+iperf    : 8.87 GBytes  6346 Mbits/sec  0 重传
+```
+
+**这是核心证据**：DPD 对硬件拥有的流一个包都不碰，而吞吐不受影响
+（流量由协议栈/硬件正常转发）。
+
+### 4.2 fallback：硬件失败的流，DPD 收回来
+
+```
+ppe_mode = fallback
+flow_hit: 291918 -> 314248      <- 恢复增长
+iperf   : 1.21 GBytes  5195 Mbits/sec
+```
+
+这正是"双加速"的实际含义：硬件先挑，硬件不行 DPD 兜底。
+
+### 4.3 grace：新流上不抢，先等内核决定
+
+```
+ppe_mode = yield, ppe_grace_ms = 3000, 全部标记 UNKNOWN
+ppe_grace: 38004 -> 75696       <- 等待窗口生效
+flow_hit : 几乎不动（+2）
+iperf    : 1.53 GBytes  6580 Mbits/sec
+```
+
+## 5. 一致性守卫（CI）
+
+`dpdfwd` 故意不 include `bpf/core/src/dpd_common.h`：控制面只通过 `dpdctl`
+和 pinned map 说话，为了共享 6 个常数而拖进 `linux/bpf.h` 会把它绑死在某版
+内核 UAPI 上。代价是枚举定义重复两份。
+
+`scripts/verify-ppe-abi.sh` 是守卫，已接进 `lint` workflow：
+
+```
+ok:   dpd_ppe_state identical (6 values)
+      DPD_PPE_UNKNOWN=0
+      DPD_PPE_SW_ACTIVE=1
+      DPD_PPE_YIELDED=2
+      DPD_PPE_OFFLOADED=3
+      DPD_PPE_FAILED=4
+      DPD_PPE_DENIED=5
+ok:   the hit path calls dpd_ppe_yield()
+ok:   ST_PPE_YIELD defined
+ok:   ST_PPE_GRACE defined
+verify-ppe-abi: OK
+```
+
+**负向测试**：把 `dpd_plugin.h` 里的 `DPD_PPE_DENIED` 改成 9，脚本立即
+FAILED 并逐值打印两份定义；改回来后 OK。写这个脚本时还抓到自己的一个 bug:
+最初的 shell/awk 版本把"显式 =0 之后隐式递增"算错（`SW_ACTIVE` 报成 0
+而不是 1），会掩盖真实差异，已改成 python 实现。
+
+## 6. gate 的变化：从"一刀切让开"到"可协商"
+
+ABI 21 的 gate 规则是：只要 fw4 开了 flow offloading 就降级 observe。
+这对 `ppe_mode=off` 是对的（看不见硬件就别抢），但它让双加速**不可能**发生。
+
+现在：
+
+| 条件 | 结果 |
+|---|---|
+| `ppe_mode=dual\|fallback` + flow offloading | 允许共存，gate 记日志 |
+| 其他 + flow offloading | 仍降级 observe，并提示怎么开 dual |
+
+## 7. 硬件侧仍然没动（诚实记录）
+
+```
+offloaded     = 0
+live_entries  = 0
+active_flows  = 0 0 0/2048
+wan carrier   = 0
+br-lan ports  = 3  (lan1/lan2/lan3)
+```
+
+原因不变，且**不是代码问题**：
+
+1. 所有端口都在 `br-lan`，桥内流量由交换机硬件直转，**不经过 L3/flowtable**；
+2. WAN 无载波，构造不出第二段路由；
+3. 驱动的拒绝计数全为 0（`ingress_not_switch_port`、`egress_not_switch_port`、
+   `no_egress_l2_header`…），说明它**从未被请求过**，不是拒绝。
+
+`lan2` 有 13455 rx / 20393 tx 和真实设备在跑，拆它会断线，所以没有动。
+
+**要在硬件侧验收 `offloaded>0`，需要二选一**：
+- 给 WAN 插网线拿到载波；
+- 指认一个可以临时拆出 `br-lan` 的空闲端口。
+
+## 8. 复现
+
+```sh
+# 数据面
+clang -target bpf -O2 -g -DDPD_MODE_DEFAULT=1 ...
+clang --target=aarch64-linux-gnu -static ... -o dpdctl
+clang --target=aarch64-linux-gnu -static ... -o dpdfwd
+
+# 设备上
+tc qdisc add dev <if> clsact
+tc filter add dev <if> ingress bpf obj dpd_fastpath.bpf.o sec classifier/l2 da
+dpdctl ifaces <in> <out>
+dpdctl set mode stateful
+dpdctl set ppe yield        # or dual
+dpdctl set grace 2000
+dpdctl set enable 1
+
+# 模拟"硬件接管了这条流"
+dpdctl flows ppe offloaded
+dpdctl stats | grep -E 'ppe_|flow_hit'
+```
