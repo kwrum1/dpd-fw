@@ -572,6 +572,10 @@ dpd_gate_mode() {
 		code=mode-observe
 		why="configured mode is 'observe': telemetry only, by operator request"
 	elif dpd_mode_wants_accel "$mode"; then
+		if dpd_hw_offload_active; then
+			code=hw-offload
+			why="fw4 flow offloading (software or hardware) is enabled: the kernel flowtable/PPE already accelerates these flows, and DPD does not compete with it -- staying in observe"
+		fi
 		# Acceleration is a *forwarding* optimisation: it redirects LAN->WAN
 		# flows out of the uplink. With no uplink at all (WAN down, no cable,
 		# no lease yet) there is nothing to accelerate, and the program must
@@ -580,7 +584,7 @@ dpd_gate_mode() {
 		# it run. Measured on the lab VM (single-NIC, no WAN), stateless mode
 		# made every TCP/UDP connection *to the router* time out while ICMP
 		# still answered -- i.e. the box became unmanageable.
-		if ! dpd_has_uplink; then
+		if [ "$code" = "ok" ] && ! dpd_has_uplink; then
 			code=no-uplink
 			why="no uplink (no WAN device or no default route), so there is no forwarding path to accelerate and hooking the LAN would only steal traffic addressed to the router itself"
 		fi
@@ -638,6 +642,21 @@ dpd_gate_mode() {
 	dpd_gate_publish "$mode" observe "$code" "$why"
 	echo observe
 	return 0
+}
+
+# fw4 flow offloading means the kernel flowtable (and on PPE/NSS silicon, the
+# hardware) already owns the forwarding path. Two accelerators on one flow is
+# exactly the conflict this project refuses to create, so the gate downgrades
+# to observe instead of competing. The x86/RK images set flow_offloading=0, so
+# this is a no-op there; it exists for IPQ/MTK and for anyone who installs the
+# package on a stock image.
+dpd_hw_offload_active() {
+	local fo=0 fh=0
+
+	config_load firewall 2>/dev/null || true
+	config_get fo '@defaults[0]' flow_offloading 0
+	config_get fh '@defaults[0]' flow_offloading_hw 0
+	[ "$fo" = "1" ] || [ "$fh" = "1" ]
 }
 
 # Is there a real uplink to accelerate towards? A device that exists, is not

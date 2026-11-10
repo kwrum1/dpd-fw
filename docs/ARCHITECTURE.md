@@ -778,6 +778,105 @@ UDP 自适应的真机/双 peer 验证。按流定向失效已落地（见 P1.1�
 与 NSS/ECM 的区别、探测与实施阶段，见 `docs/RESEARCH-PPE-DUAL.md`；只读探测
 脚本为 `scripts/ppe-probe.sh`。
 
+## 18. ABI 21：命中路径的单位成本（2026-11-10）
+
+这一版不改任何 map 的 value 大小（`sizeof(struct dpd_flow_val)` 仍是 72，
+`nat_checked_ms` 占用了 `__u64 packets/bytes` 本来就要求的对齐填充），
+但语义变了，所以必须 bump 并让 `dpd_pins_compat()` 丢掉旧 pin。
+
+### 18.1 做了什么
+
+| 改动 | 位置 | 收益 |
+|---|---|---|
+| NAT 闸门改为 250 ms 复核一次 | 命中路径 | 上行 NAT 流每包少一次 `dpd_nat` hash 查找 |
+| FIN/RST 同时释放反向条目 | 命中路径 | 关闭的连接不再让反向条目活到 TTL |
+| 邻居事件只在真正坏掉时才 bump | `dpdfwd` | 见 18.3，这一条是数量级的 |
+
+`nat_checked_ms` 是 `CLOCK_MONOTONIC` 毫秒，和 `last_seen_ms` 同一个时钟。
+命中路径现在的判据是
+
+```c
+(__u32)(now - fval->nat_checked_ms) >= DPD_NAT_CHECK_MS   /* 250 */
+```
+
+250 ms 远小于 einat 绑定本身的存活时间，所以“einat 已经不在了”这个事实
+最多迟到 250 ms 被发现，代价是极少数包走一次栈；换来的是每包一次 hash 查找。
+
+### 18.2 两个被实测否掉的“优化”
+
+两条都在 6.17 构建机上用**真实 verifier** 加载验证过，记录在此以免被重新加回来：
+
+1. **`bpf_redirect_map()` + `BPF_MAP_TYPE_DEVMAP`** —— 它是 XDP helper。
+   sched_cls 程序调用会被内核直接拒绝：
+
+   ```
+   program of this type cannot use helper bpf_redirect_map#51
+   ```
+
+   TC 只有 `bpf_redirect()` 和 `bpf_redirect_neigh()`。
+   Katran 能这么写是因为它是 XDP，而 XDP 是本项目的红线。
+
+2. **`bpf_ktime_get_coarse_ns()` 替代每个包的 `bpf_ktime_get_ns()`** ——
+   两者是**不同的时钟域**。coarse 时钟可能比 fine 慢一个 tick，于是
+
+   ```c
+   age = (__s32)(now - last_seen_ms)   /* 变成负数 */
+   ```
+
+   而负 age 的含义是“已过期”，结果就是**每条流在第一次命中时被立刻删除**。
+   要么全用 `bpf_ktime_get_ns()`，要么全换，绝不能混。
+
+### 18.3 邻居事件的 epoch 策略（P0）
+
+N5000 实测（2026-11-10，开机 8036 s）：
+
+| 指标 | 值 |
+|---|---|
+| 邻居事件 | 6503 次 ≈ 0.8/s |
+| epoch bump | 258 次 ≈ 1 次 / 31 s |
+| 空闲瞬时 | ~52 hit/s vs ~37 miss/s |
+| 流表 | 8039 → 680（r8 prune 后）|
+
+旧逻辑：任何 `RTM_NEWNEIGH/DELNEIGH` 都算“软”事件，30 s 冷却被 0.8/s 的
+事件流永久顶满，于是**每 31 秒整张流表逻辑失效一次**，所有活跃流重新走
+8 个包的 priming。空闲时那 37 miss/s 里绝大部分不是新流，是重学。
+
+新逻辑在 `dpdfwd` 里按地址跟踪 `lladdr`：
+
+- 只有 `NUD_FAILED` / `NUD_INCOMPLETE` / `RTM_DELNEIGH`，或**同一地址的
+  lladdr 真的变了**，才 bump；
+- 普通 `NUD_REACHABLE` 刷新、REACHABLE→STALE、邻居 GC 一律忽略
+  （计入 `neigh_ignored`）；
+- 保留 5 分钟兜底扫描（`NEIGH_SWEEP_MS`），覆盖“交换机/AP 静默换了 MAC”
+  这种我们看不见的情况；这是唯一剩下的周期性 bump。
+
+所以最坏情况从“每 30 s 全表重学”变成“最长 5 min 才重学一次”，
+而正常情况是**不重学**。
+
+### 18.4 怎么验证
+
+```sh
+# 1. verifier 必须接受四个程序（不是“clang 编过了”）
+tc filter add dev <dev> ingress bpf obj dpd_fastpath.bpf.o sec classifier/l2 da
+tc filter add dev <dev> ingress bpf obj dpd_fastpath.bpf.o sec classifier/l3 da
+tc filter add dev <dev> egress  bpf obj dpd_fastpath.bpf.o sec classifier/egress da
+
+# 2. 30 s 增量：miss 应该从 ~37/s 掉下来，epoch_bumps 应该趋近 0
+dpdctl status -j > /tmp/a; sleep 30; dpdctl status -j > /tmp/b
+cat /var/run/dpd/flowd.json     # 看 epoch_bumps / neigh / neigh_ignored
+
+# 3. 单包成本（有 bpftool 时）
+bpftool prog profile id <id> duration 10
+```
+
+### 18.5 没做的事
+
+- 每 CPU 热缓存（`dpd_hot`）：需要复制一份状态，还得让所有 `dpdctl` 的
+  删除/写入路径同时维护它，正确性风险远大于省下的 20–40 cycles。
+  在拿到 `bpftool prog profile` 的真实数据之前不做。
+- per-CPU 分片主表 + RPS/XPS：属于多核扩展，要单独一轮 A/B 才能判断，
+  不该和正确性改动混在一起。
+
 ## 17. 参考
 
 - Qualcomm NSS/ECM: https://github.com/qosmio/nss-packages
