@@ -76,7 +76,13 @@
  * NEIGH_SWEEP_MS is the backstop for the case we cannot see (a switch or AP
  * silently changing what a MAC reaches): a cached dmac is trusted for this
  * long, then one bump re-learns everything. 5 min of a black hole in that
- * one scenario is far cheaper than re-learning the table every 31 s. */
+ * one scenario is far cheaper than re-learning the table every 31 s.
+ *
+ * NEIGH_BUMP_MS is therefore no longer a rate limit on "how often may we
+ * invalidate": it is only the burst coalescer for events that already passed
+ * neigh_event(). It is short (5 s) precisely because a real lladdr change must
+ * propagate fast; the old 30 s value was what turned 0.8 events/s into a
+ * permanent "invalidate everything" mode. */
 #define NEIGH_BUMP_MS 5000
 #define NEIGH_SWEEP_MS 300000L
 #define NEIGH_TRACK_MAX 512
