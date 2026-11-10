@@ -154,7 +154,49 @@ ABI 21 的 gate 规则是：只要 fw4 开了 flow offloading 就降级 observe�
 | `ppe_mode=dual\|fallback` + flow offloading | 允许共存，gate 记日志 |
 | 其他 + flow offloading | 仍降级 observe，并提示怎么开 dual |
 
-## 7. 硬件侧仍然没动（诚实记录）
+## 7. 硬件侧：已查清，是驱动不支持（不是没测出来）
+
+> 完整证据见 `PPE-HW-CAPABILITY-2026-11-11.md`。这里只放结论。
+
+在反复尝试之后，硬件侧的问题已经从"不知道怎么触发"变成了一个**确定的
+能力事实**：
+
+```
+# tc filter add ... flower ... skip_sw action drop
+RTNETLINK answers: Not supported          <- -EOPNOTSUPP
+```
+
+```
+# grep -E 'setup_tc|flow_block' /proc/kallsyms | awk '{print $3}'
+qca_ppe_setup_tc_mqprio      <- 队列整形
+qca_ppe_setup_tc_ets         <- 调度
+qca_ppe_setup_tc_prio        <- 优先级
+qca_ppe_setup_tc_tbf         <- 限速
+```
+
+这个驱动的 `ndo_setup_tc` **只实现 QoS 整形**，没有 `FLOW_BLOCK_BIND`。
+netfilter 的 `nft ... flowtable flags offload` 走的正是 `flow_block`，
+所以它不可能到达硬件，`offloaded` 永远是 0。
+
+三条互相独立的证据：
+
+1. `skip_sw` 被内核拒绝（`Not supported`）；去掉 `skip_sw` 能装上但标记
+   `not_in_hw`；
+2. 没有 `bind` 文件（MTK PPE 有 `/sys/kernel/debug/ppe0/bind`）；
+3. 驱动的拒绝计数**全为 0** —— 说明从未被请求过，不是拒绝了某个流。
+
+同时确认：**软件 flowtable 是工作的**（两个 netns 之间桥转发 iperf3
+6.7 Gbit/s，conntrack 出现 `[OFFLOAD]`）。所以这台机器上"软硬双加速"的
+硬件那一半**在这个内核里不存在**，与我们是否实现协调层无关。
+
+ABI 22 的价值也因此更清楚了：它依赖的是内核告诉我们"这条流被别人接管
+了"，而软件 flowtable 恰好会写 `IPS_OFFLOAD` —— 这一点已经在真机上验证。
+
+### 7.1 原本记录的"环境限制"
+
+以下是最初的判断，已被上面的证据取代，保留以说明排查过程：
+
+
 
 ```
 offloaded     = 0
