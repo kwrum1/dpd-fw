@@ -3,165 +3,170 @@
 设备：太乙 `10.10.10.100`，ImmortalWRT SNAPSHOT `r0-5cd11f1`，
 `qualcommax/ipq60xx`，kernel **6.18.55**，aarch64 Cortex-A53。
 
-## 1. 结论
+## 0. 结论（含一次自我纠正）
 
-**这个内核里的 `qca-ppe` 驱动没有注册任何 flow-block / tc 硬件卸载钩子。**
-所以 `/sys/kernel/debug/3a000000.ppe/offload` 的 `offloaded` / `live_entries`
-永远是 0 —— 不是没有流量，也不是配置错误，而是**没有通路**。
+**这台机器的 PPE 硬件卸载是工作的**，但它走的是 **tc flower（ACL 表）**，
+不是 nft flowtable 的 L3 卸载。两者是不同的表，计数器也不同：
 
-这不是猜测，下面每一条都是设备上的实测输出。
+| 表 | 用途 | 本机状态 |
+|---|---|---|
+| `acl` | tc flower 的 L2–L4 匹配 + drop/redirect | ✅ **工作**（`in_hw`） |
+| `offload` / `live_entries` | netfilter flowtable 的 L3 卸载 | ❌ 恒为 0 |
 
-## 2. 证据
+> **纠正**：本文的第一版写着"驱动没有注册任何 flow-block 钩子，所以硬件
+> 卸载不可用"。前半句对，后半句错。实测发现 `tc flower skip_sw` 只要把
+> filter preference 降到 512 以下，就真的落进硬件（`in_hw in_hw_count 1`）。
+> 第一版之所以失败，是因为 `tc` 默认 pref 是 **49152**，超出驱动 ACL 索引
+> 空间（512），内核返回的 `Not supported` 掩盖了真正的错误信息。
+> 这个教训值得留着：**默认参数导致的 ENOTSUPP 不等于能力缺失**。
 
-### 2.1 `skip_sw` 直接被内核拒绝
-
-`skip_sw` 的含义是"只装硬件，不允许软件回退"。驱动不能卸载时内核返回
-`-EOPNOTSUPP`：
-
-```
-# tc filter add dev dpa ingress protocol ip flower dst_ip ... skip_sw action drop
-RTNETLINK answers: Not supported
-
-# tc filter add dev dpa ingress protocol ip matchall skip_sw action drop
-RTNETLINK answers: Not supported
-```
-
-同一个 filter **去掉** `skip_sw` 就能装上，但被明确标记 `not_in_hw`：
+## 1. 证据：tc flower 真的落进硬件
 
 ```
-# tc filter add dev dpa ingress protocol ip flower dst_ip 192.168.200.10 action drop
-# tc filter show dev dpa ingress
-filter protocol ip pref 49152 flower chain 0 handle 0x1
+# tc qdisc add dev lan3 clsact
+# tc filter add dev lan3 ingress pref 100 protocol ip flower \
+      dst_ip 10.9.9.9 skip_sw action drop
+
+# tc filter show dev lan3 ingress
+filter protocol ip pref 100 flower chain 0 handle 0x1
   eth_type ipv4
-  dst_ip 192.168.200.10
-  not_in_hw          <-- 硬件没收
+  dst_ip 10.9.9.9
+  skip_sw
+  in_hw in_hw_count 1          <-- 硬件收下了
+	action order 1: gact action drop
+	 index 3 ref 1 bind 1
+	used_hw_stats immediate        <-- 硬件在统计
 ```
 
-### 2.2 驱动只在 QoS 方向实现 `ndo_setup_tc`
+`skip_sw` 的含义是"只装硬件，不允许软件回退"。它能成功，就证明硬件真的
+接了这个 filter。
 
-`/proc/kallsyms` 里的实际符号：
-
-```
-qca_ppe_setup_tc          <-- 分发器
-qca_ppe_setup_tc_mqprio   <-- 队列整形
-qca_ppe_setup_tc_ets      <-- ETS 调度
-qca_ppe_setup_tc_prio     <-- 优先级映射
-qca_ppe_setup_tc_tbf      <-- 令牌桶限速
-```
-
-全是 **QoS 整形**，没有一个是 `FLOW_BLOCK_BIND` 或 `FLOW_BLOCK_UNBIND`。
-netfilter 的 flowtable（`nft ... flowtable flags offload`）走的正是
-`flow_block` 回调，所以它**根本到不了这个驱动**。
-
-对比：一个真正支持 flowtable 卸载的驱动会暴露 `ndo_setup_tc` 里处理
-`TC_SETUP_FT` / `TC_SETUP_CLSFLOWER` 的分支，并且在 debugfs 里有一个
-`bind` 文件（MTK PPE 就是 `/sys/kernel/debug/ppe0/bind`）。
+### 1.1 行为可验证：增删都正确
 
 ```
-# ls /sys/kernel/debug/3a000000.ppe/ | grep -c bind
-0
+装第二个 (pref 200):  hw-bound filters = 2
+删掉 pref 200:        hw-bound filters = 1
 ```
 
-### 2.3 有 `cls_flower` 符号，但对 DSA 用户端口无效
+硬件的 ACL 索引被正确分配和回收。
+
+### 1.2 非 switch 端口会被正确拒绝
 
 ```
-qca_ppe_cls_flower_add
-qca_ppe_cls_flower_del
-qca_ppe_cls_flower_stats
+# tc filter add dev dpa ingress pref 100 ... skip_sw ...     (dpa 是 veth)
+RTNETLINK answers: Not supported
 ```
 
-这些是 DSA switch 的 flower 卸载入口。但实测 `skip_sw` 返回 `Not supported`，
-说明在当前 DSA 拓扑（`lan1/lan2/lan3/wan` 都是同一块 `eth0` 的 DSA 用户端口）
-下，它没有被接通到可用的硬件表。
+驱动只接受真实 switch 端口（`lan1/lan2/lan3/wan`），对 veth 明确拒绝。
+这正是 `ingress_not_switch_port` / `egress_not_switch_port` 这两个计数器
+存在的理由。
 
-### 2.4 驱动自己的拒绝计数全为 0
-
-```
-offloaded                0
-live_entries             0
-ingress_not_switch_port  0
-egress_not_switch_port   0
-no_egress_l2_header      0
-unsupported_match        0
-unsupported_protocol     0
-unsupported_action       0
-table_full               0
-```
-
-**关键**：如果驱动被请求过但因为参数不合适而拒绝，这些计数器会动。
-全 0 说明它**从未被请求**。结合 2.1 的 `-EOPNOTSUPP`，结论一致：
-卸载请求在到达驱动之前就被内核挡掉了。
-
-### 2.5 硬件本身在转发，只是不经过卸载表
+### 1.3 pref 必须 < 512
 
 ```
-# cat /sys/kernel/debug/3a000000.ppe/egress
-port packets bytes drop_packets drop_bytes
-0    24311   9415762 0 0
-2    15963   6105427 0 0
-3    31094  12311625 0 0
+# tc filter add dev lan3 ingress flower ... (默认 pref 49152)
+Error: qca_ppe: filter preference is above what the classifier can order;
+       use one below 512.
 ```
 
-交换 ASIC 确实在转发（端口计数在涨），`active_flows` 只是 L3 卸载表的
-占用（`0 0 0/2048`），两者不是一回事。桥内/普通转发由 ASIC 的 L2 表完成，
-不需要 L3 卸载表。
+filter preference 就是硬件 ACL 的索引空间。**默认值会失败，必须显式指定
+`pref < 512`**。这是这台机器上最重要的操作细节。
 
-### 2.6 软件 flowtable 是工作的
+## 2. 为什么 `offloaded` / `live_entries` 恒为 0
 
-用两个 netns 之间的桥转发实测（iperf3 **6.7 Gbit/s**），conntrack 出现了
-`[OFFLOAD]` 条目：
+因为它们统计的是**另一张表**：
 
 ```
-conntrack OFFLOAD entries: 2
+offloaded              <- netfilter flowtable 的 L3 卸载（FLOW_BLOCK_BIND）
+live_entries           <- 同上，当前在表条数
+active_flows 0 0 0/2048<- L3 流表占用
+l3_interface           <- 每个被路由的子网一条
 ```
 
-也就是**软件 flowtable 正常加速**，只是不会下沉到 PPE 硬件。这正是
-ABI 22 协调层要处理的场景，也是 `ppe_yield` 在真实设备上被验证的原因。
+`qca_ppe_setup_tc` 的符号表证明它**只实现 QoS 整形**：
 
-## 3. 那么"软硬双加速"到底是什么状态
+```
+qca_ppe_setup_tc_mqprio   <- 队列
+qca_ppe_setup_tc_ets      <- 调度
+qca_ppe_setup_tc_prio     <- 优先级
+qca_ppe_setup_tc_tbf      <- 限速
+```
+
+没有 `FLOW_BLOCK_BIND`/`TC_SETUP_FT` 分支，所以 `nft ... flowtable flags offload`
+永远到不了它。这点第一版的判断是对的。
+
+**但 tc flower 走的是另一条路**（`qca_ppe_cls_flower_add`），那条路是通的。
+
+## 3. 这对"软硬双加速"意味着什么
 
 | 层 | 状态 | 证据 |
 |---|---|---|
-| 软件加速（DPD TC eBPF） | ✅ 完整验证 | 6.3–7.7 Gbit/s，命中率 99.98% |
+| DPD 软件数据面 | ✅ 完整验证 | 6.3–7.7 Gbit/s，命中率 99.98% |
 | 软件 flowtable | ✅ 工作 | conntrack `[OFFLOAD]`，桥转发 6.7 Gbit/s |
 | 软件↔软件协调（ABI 22） | ✅ 完整验证 | `ppe_yield` 94664→174356，`flow_hit` 冻结 |
-| **硬件卸载（qca-ppe L3）** | ❌ **驱动不支持** | `skip_sw` → `Not supported`，无 flow-block 符号 |
+| **PPE 硬件 ACL 卸载（tc flower）** | ✅ **实证工作** | `in_hw in_hw_count 1`，增删正确 |
+| PPE 硬件 L3 卸载（nft flowtable） | ❌ 驱动未实现 | `offloaded` 恒 0，无 `FLOW_BLOCK_BIND` |
 
-所以这台机器上**不存在"软硬双加速"的硬件那一半**，不是我们没做出来，
-是这颗内核的驱动没有提供这个能力。
+所以"软硬双加速"在这台机器上的正确形态是：
 
-## 4. 要在硬件侧真正闭环，有两条路
+- **硬件**：PPE 的 ACL/steering 表（tc flower），用于 drop/redirect/限速；
+- **软件**：DPD 的 TC eBPF 数据面，用于转发加速；
+- **协调**：ABI 22 让 DPD 在 flowtable 接管某条流时让路。
 
-### 4.1 换用支持 flowtable 卸载的驱动/机型
-- MTK PPE：`/sys/kernel/debug/ppe0/bind` 存在，`IPS_HW_OFFLOAD` 会被写入；
-- Qualcomm **NSS/ECM**（IPQ807x 的 out-of-tree 栈）：`ecm_front_end_acceleration_modes`
-  可以观测，但**注意它不一定写 `IPS_HW_OFFLOAD`**（见
-  `RESEARCH-PPE-FALLBACK.md` 的说明），那种情况下 ABI 22 需要改为读
-  ECM 的 netlink 状态，而不是 conntrack 位。
+硬件的 L3 转发卸载（比 eBPF 更省 CPU 的那种）**这颗内核不支持**，
+不是没配置对。
 
-### 4.2 在这台机器上验证"协调"而非"硬件"
-ABI 22 的价值本来就不依赖硬件是否真的接管：它依赖的是**内核告诉我们
-"这条流被别人接管了"**。软件 flowtable 恰好会写 `IPS_OFFLOAD`，这一点
-已经在真机上验证（`ppe_yield` 冻结 `flow_hit`）。
+## 4. 在这台机器上做实"硬件那一半"的正确方法
 
-如果目标是验证 `IPS_HW_OFFLOAD` 分支，需要一台 MTK PPE 或 NSS 设备。
-
-## 5. 复现命令
+由于 tc flower 可用，硬件侧的验收应该这样做，而不是等 WAN 载波：
 
 ```sh
-# 1. 硬件卸载是否被支持（最直接的一条）
-tc qdisc add dev <port> clsact
-tc filter add dev <port> ingress protocol ip flower dst_ip 10.0.0.1 \
-    skip_sw action drop
-#   -> "RTNETLINK answers: Not supported"  = 驱动不支持
+# 1. 在真实 LAN 端口上装一个硬件 ACL，确认 in_hw
+tc qdisc add dev lan3 clsact
+tc filter add dev lan3 ingress pref 100 protocol ip flower \
+    dst_ip <某个测试地址> skip_sw action drop
+tc filter show dev lan3 ingress | grep in_hw      # -> in_hw in_hw_count 1
 
-# 2. 驱动实现了哪些 setup_tc 分支
-grep -E 'setup_tc|flow_block|cls_flower' /proc/kallsyms | awk '{print $3}'
+# 2. 确认驱动 ACL 表在计数
+cat /sys/kernel/debug/3a000000.ppe/acl
 
-# 3. 有没有 flow_block 注册
-ls /sys/kernel/debug/*.ppe/ | grep -c bind      # 0 = 没有
-
-# 4. 驱动是否被请求过（全 0 = 从未被请求）
-grep -E 'offloaded|live_entries|not_switch_port|unsupported' \
-     /sys/kernel/debug/*.ppe/offload
+# 3. 确认删除后硬件释放
+tc filter del dev lan3 ingress pref 100
+tc filter show dev lan3 ingress | grep -c in_hw   # -> 0
 ```
+
+这套流程不需要第二块网卡、不需要 WAN 载波，也不碰任何现有流量
+（ACL 只匹配测试地址）。
+
+## 4.1 决定性证据：`Sent hardware` vs `Sent software`
+
+前面证明的是"filter 进了硬件"。这一条证明的是"**包真的由硬件处理**"。
+
+在 lan1/lan2 上装一条匹配 NAS（`10.10.10.173`）的硬件 ACL，然后等真实流量：
+
+```
+--- lan2 ---
+    src_ip 10.10.10.173
+    in_hw in_hw_count 1
+    Sent 612 bytes 8 pkt (dropped 8, overlimits 0 requeues 0)
+    Sent software 0 bytes 0 pkt          <-- 软件路径：0 个包
+    Sent hardware 612 bytes 8 pkt        <-- 硬件路径：8 个包全部
+    used_hw_stats immediate
+
+driver acl hit: 3 -> 10
+```
+
+`Sent software 0 pkt` / `Sent hardware 8 pkt` 是这套硬件加速最硬的证据：
+8 个真实数据包由 PPE 处理并丢弃，**CPU 一个都没碰**。同时驱动自己的
+`acl` 表从 3 涨到 10，说明是硬件计数器在报数，不是软件模拟。
+
+（lan1 上那条是 0 包，因为 NAS 的流量从 lan2 进——两个端口都装了规则，
+正好用来说明"装上了"和"真的用上了"是两回事，前者看 `in_hw`，后者看
+`Sent hardware`。）
+
+## 5. 若要验证 flowtable L3 卸载
+
+需要另一台硬件：MTK PPE（有 `/sys/kernel/debug/ppe0/bind`）或支持
+`FLOW_BLOCK_BIND` 的驱动。Qualcomm NSS/ECM 是 out-of-tree 栈，其
+`IPS_HW_OFFLOAD` 写入**不保证**，需按 `RESEARCH-PPE-FALLBACK.md` 说明
+改为读 ECM 的 netlink 状态。
