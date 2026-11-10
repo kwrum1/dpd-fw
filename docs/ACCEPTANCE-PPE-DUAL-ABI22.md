@@ -274,7 +274,36 @@ conntrack 看到的包太少、**根本没有卸载**（`[OFFLOAD] = 0`），自
 `IPS_OFFLOAD`，之后 `dpdfwd` 记录 `YIELDED`，DPD 就永久让路。这个顺序是
 协调层能工作的前提，不是可调参数。
 
-## 8. 进了镜像（这一条已闭环）
+## 8. 进了镜像（这一条已闭环，含端到端修复）
+
+### 8.0 第二次构建：r11 / r10
+
+第一次镜像（`0466df8`）里是 r10/r9，**不含**后面修掉的四个端到端缺陷。
+用 `c9ddb3c` 重建后重新核对发布产物：
+
+```
+release: dpd-fw-wrt-X86-26.11.11-04.25.56
+
+manifest:
+  dpd-fastpath - 0.1.0-r11      <- 之前 r10
+  dpdfwd       - 0.1.0-r10      <- 之前 r9
+
+rootfs (dpd-fw-wrt-x86-64-rootfs-none-26.11.11-04.25.56.tar.gz):
+  /usr/lib/dpd/abi = 22
+  lib/bpf/dpd_fastpath.bpf.o = 311656 bytes
+  usr/sbin/dpdfwd = 36923 bytes     <- 之前 24635，体积印证修复合入
+  usr/sbin/dpdctl = 44699 bytes
+  option ppe_mode 'off'
+  option ppe_grace_ms '0'
+
+二进制内容核对（不是看构建日志）：
+  dpdfwd contains /proc/net/nf_conntrack : True   <- sweep 在
+  dpdfwd contains ppe_swept              : True   <- 新计数器在
+```
+
+所以镜像里跑的确实是端到端验证过的那一版。
+
+### 8.1 第一次构建（r10 / r9，已作废）
 
 ABI 22 不只是在设备上手工验证：它已经**打包进正式镜像**并核对过实际产物。
 
