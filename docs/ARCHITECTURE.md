@@ -877,6 +877,103 @@ bpftool prog profile id <id> duration 10
 - per-CPU 分片主表 + RPS/XPS：属于多核扩展，要单独一轮 A/B 才能判断，
   不该和正确性改动混在一起。
 
+## 19. ABI 22：软硬双加速的协调层（2026-11-11）
+
+这一版把"DPD 和硬件同时加速"从一个设想变成可验证的机制。
+上一版（ABI 21）只修了识别 bug，`dpd_ppe` 状态、`ppe_fallback`、
+`ppe_grace_ms` 在代码里**完全不存在**；现在都有了。
+
+### 19.1 为什么需要它
+
+一台 Qualcomm 路由器上，硬件（`qca-ppe`，或 NSS+ECM）和 DPD 的 TC 数据面
+可以同时加速同一条连接。谁先碰到包谁赢，另一方的计数就变成谎话；在 NSS 上
+更糟——被卸载的包**根本不回到 Linux**，DPD 的流表会一直"命中"一条实际上
+已经不在自己手里的流。
+
+所以 DPD 必须能**按流让路**，而且这个判断必须来自证据，不能靠猜。
+
+### 19.2 证据从哪来
+
+conntrack。`CTA_STATUS` 的两个位就是内核在说"这条流交给别人了"：
+
+| 位 | 含义 | 映射到的状态 |
+|---|---|---|
+| `IPS_HW_OFFLOAD` (bit15) | 硬件引擎接管 | `DPD_PPE_OFFLOADED` |
+| `IPS_OFFLOAD` (bit14) | 交给 flowtable | `DPD_PPE_YIELDED` |
+| 都没有 | 没人认领 | `DPD_PPE_SW_ACTIVE` |
+
+先判硬件位，因为 `HW_OFFLOAD` 隐含 `OFFLOAD`。
+
+状态写进 `dpd_flow_val.ct_cookie`——这个字段从 ABI 18 起就是
+"留给可选的 bpf_ct 路径"但从未使用，所以**条目仍是 72 字节**，
+命中路径**不需要额外查表**。这是整个设计的关键：协调不能给热路径加成本。
+
+写入用 `dpdctl flows ppe -f <file>` 批量提交，`dpdfwd` **每秒最多一次 fork**，
+不是每个 conntrack 事件一次 fork。和 `delete -f` 是同一个模式。
+
+### 19.3 三种行为
+
+```
+ppe_mode=off       从不 yield。x86/RK 默认：那里没有这种硬件。
+ppe_mode=yield     OFFLOADED/YIELDED 时让路，其余归 DPD。
+ppe_mode=dual      硬件有优先权；硬件 FAILED/DENIED 的流 DPD 收回来。
+                   这才是真正意义的"双加速"：一台机器，两个引擎，
+                   每条流只有一个主人。
+```
+
+`ppe_grace_ms` 让新流先让一会儿，给内核时间去判断要不要接管，
+避免两个引擎在一条新流上抢。
+
+命中路径的判定（`dpd_ppe_yield()`）：
+
+```c
+OFFLOADED / YIELDED   -> 让路（ST_PPE_YIELD）
+FAILED / DENIED       -> dual 收回，yield 让路
+UNKNOWN / SW_ACTIVE   -> 在 grace 窗口内让路（ST_PPE_GRACE）
+```
+
+### 19.4 真机实测（IPQ60xx，10.10.10.100，6.18.55）
+
+veth 对 + iperf3，三个语义各自验证：
+
+| 场景 | 结果 | 判定 |
+|---|---|---|
+| `yield` + 全部标记 OFFLOADED | `ppe_yield` 14 → **76487**，`flow_hit` 冻结在 147740，吞吐不变 **6.1 Gbit/s** | 数据面确实停止碰硬件拥有的流 |
+| `fallback` + 标记 FAILED | `flow_hit` 恢复：233903 → **269085** | DPD 收回了硬件失败的流 |
+| `grace=2000` + 标记 UNKNOWN | `ppe_grace` 0 → **38004**，`flow_hit` 只 +2 | 新流上 DPD 等待而不是抢 |
+
+这三条覆盖了协调层的全部行为分支。
+
+### 19.5 一致性守卫
+
+`dpdfwd` **故意不 include** `bpf/core/src/dpd_common.h`——控制面只通过
+`dpdctl` 和 pinned map 与数据面说话，为了共享 6 个常数而拖进 `linux/bpf.h`
+会把控制面绑死在某版内核 UAPI 上。
+
+代价是枚举定义重复了两份。`scripts/verify-ppe-abi.sh` 就是守卫：
+两份必须逐值相同，且命中路径必须真的调用 `dpd_ppe_yield()`。
+实测过"改一个值就 FAIL、改回来就 OK"。
+
+### 19.6 gate 的变化
+
+ABI 21 的 gate 是"只要 fw4 开了 flow offloading 就降级 observe"。
+这在 `ppe_mode=off` 时是对的（看不见硬件就别抢），但它让双加速**不可能**
+发生。现在：
+
+- `ppe_mode=dual|fallback` + flow offloading → 允许共存，gate 记一条日志；
+- 其他情况 + flow offloading → 仍然降级 observe，并提示怎么开 dual。
+
+### 19.7 还没做的
+
+- PPE 硬件的 `offloaded` 计数仍然是 0，因为这台机器的**所有端口都在
+  `br-lan` 里**，桥内流量由交换机硬件直转、不经过 L3/flowtable；且 WAN
+  无载波，构造不出第二段路由。驱动拒绝计数全 0 说明它**从未被请求过**，
+  不是拒绝。需要一根 WAN 网线或一个可临时拆出的端口才能验收硬件侧。
+- `dpd_ppe` 的 FAILED/DENIED 目前只能由 `dpdctl flows ppe failed|denied`
+  手工写入，或由运维脚本根据 `nssinfo`/PPE 计数器判断后写入；
+  `dpdfwd` 只自动写 OFFLOADED/YIELDED/SW_ACTIVE 这三种 conntrack 能证明的状态。
+  这是刻意的：conntrack 不知道"硬件尝试失败"，把它猜成证据会制造假状态。
+
 ## 17. 参考
 
 - Qualcomm NSS/ECM: https://github.com/qosmio/nss-packages
