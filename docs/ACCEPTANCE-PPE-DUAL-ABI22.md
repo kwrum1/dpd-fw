@@ -219,6 +219,61 @@ br-lan ports  = 3  (lan1/lan2/lan3)
 - 给 WAN 插网线拿到载波；
 - 指认一个可以临时拆出 `br-lan` 的空闲端口。
 
+## 7.5 端到端：conntrack → dpdfwd → dpdctl → 数据面（2026-11-11 补齐）
+
+这是之前唯一没有跑过的链路。所有 yield 测试都是手工
+`dpdctl flows ppe offloaded` 驱动的，`dpdfwd` 只是部署了、没有证据显示它
+真的在工作。现在跑通了，而且在跑通的过程中发现并修掉了四个真实缺陷。
+
+### 7.5.1 四个缺陷
+
+| # | 缺陷 | 为什么会发生 | 怎么发现 |
+|---|---|---|---|
+| 1 | **ctnetlink 根本不上报卸载转换** | 流被 flowtable 接管后就不再经过 netfilter，内核不会再发 CT UPDATE，`CTA_STATUS` 里的 `IPS_OFFLOAD` 永远不会出现 | 实测：proc 表里 2 条 `[OFFLOAD]`，`ct_offload` 整条连接一直是 0 |
+| 2 | sweep 的字段扫描只前进一个字节 | `/proc/net/nf_conntrack` 的列用**多个空格**对齐（`ipv4     2 tcp      6`），`p = end + 1` 落在空格上，后续 token 长度全为 0 | `ppe_swept` 一直是 0，而 `[OFFLOAD]` 明明匹配到了 |
+| 3 | 同一 tuple 可能入队两次，弱状态覆盖强状态 | 事件路径写 `SW_ACTIVE`，sweep 写 `YIELDED`，谁最后写谁赢 | 流条目显示 `ppe=sw_active`，而 sweep 日志说 `want=2`（YIELDED） |
+| 4 | 端口字节序不匹配 | `ct_tuple.sport` 是网络序，`ppe_flush` 直接 `%u` 打印；`dpdctl` 按主机序解析，于是查到的是**另一条流** | 状态写入了，但流条目的 `ct_cookie` 不动 |
+
+修复都在 `fa1628f`：
+
+- `ppe_sweep()` 每秒扫一次 `/proc/net/nf_conntrack`，作为事件路径的补充；
+- 跳过整段分隔符而不是一个字节；
+- `ppe_update()` 按 tuple 去重，`OFFLOADED(3) > YIELDED(2) > SW_ACTIVE(1)`；
+- `ppe_flush()` 用 `ntohs()` 输出主机序端口；
+- 顺带：`dpdctl flows` 增加 `ppe=<状态>` 列，否则这一切无法观察。
+
+### 7.5.2 实测结果
+
+拓扑：路由（非桥接）双 netns，`inet` flowtable 带 `flags offload`，
+`ppe_mode=yield`，`grace=3000`。**全程没有任何手工 `dpdctl flows ppe` 调用。**
+
+```
+t≈6s    ppe=yielded   ppe_yield 134819   flow_hit 0   ppe_writes 17  ppe_swept 12
+t≈12s   ppe=yielded   ppe_yield 211826   flow_hit 0   ppe_writes 29  ppe_swept 24
+t≈18s   ppe=yielded   ppe_yield 288705   flow_hit 0   ppe_writes 41  ppe_swept 36
+        conntrack [OFFLOAD] = 2
+        iperf3  18.0 GBytes / 7039 Mbits/sec
+```
+
+三个关键点同时成立：
+
+1. **`ppe=yielded`** —— 状态是 `dpdfwd` 从 conntrack 自己写进去的；
+2. **`flow_hit` 全程冻结在 0** —— 数据面一个包都没有接管被内核卸载的流；
+3. **吞吐 7.0 Gbit/s** —— 流量由 flowtable/硬件路径承载，没有因为 DPD 让路而受损。
+
+`ppe_swept` 与 `ppe_writes` 共同说明链路是活的：sweep 读到了 conntrack 的
+卸载标记，flush 把它们变成了 map 里的状态。
+
+### 7.5.3 为什么 grace 是必要的
+
+第一次尝试（`grace=0`）失败：DPD 抢在 flowtable 之前接管了流，于是
+conntrack 看到的包太少、**根本没有卸载**（`[OFFLOAD] = 0`），自然也没有
+状态可写。
+
+`grace=3000` 让 DPD 在新流的前 3 秒让路，flowtable 趁机接管并写下
+`IPS_OFFLOAD`，之后 `dpdfwd` 记录 `YIELDED`，DPD 就永久让路。这个顺序是
+协调层能工作的前提，不是可调参数。
+
 ## 8. 进了镜像（这一条已闭环）
 
 ABI 22 不只是在设备上手工验证：它已经**打包进正式镜像**并核对过实际产物。
