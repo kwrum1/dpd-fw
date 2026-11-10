@@ -24,11 +24,19 @@ ppe_dbg=0
 ecm_dbg=0
 nss_mod=0
 ppe_mod=0
+ppe_dev=0
 nss_dev=0
+edma_dev=0
 
 # --- modules ---------------------------------------------------------------
-if grep -q '^qcom_ppe ' /proc/modules 2>/dev/null ||
-   [ -d /sys/module/qcom_ppe ]; then
+# The driver is spelled differently depending on the tree: upstream calls it
+# qcom-ppe (IPQ9574/5424), the ImmortalWrt qualcommax tree ships qca-ppe
+# (IPQ60xx/807x). It is also commonly builtin, in which case /proc/modules does
+# NOT list it -- /sys/module/<name> still exists. Both spellings and both
+# builtin/module cases are checked; a probe that only looked for qcom_ppe in
+# /proc/modules reported this IPQ60xx as "no PPE" (measured 2026-11-11).
+if grep -qE '^(qcom_ppe|qca_ppe) ' /proc/modules 2>/dev/null ||
+   [ -d /sys/module/qcom_ppe ] || [ -d /sys/module/qca_ppe ]; then
 	ppe_mod=1
 fi
 if grep -qE '^(qca_nss_drv|qca_nss_dp|qca_nss_ecm) ' /proc/modules 2>/dev/null ||
@@ -37,7 +45,14 @@ if grep -qE '^(qca_nss_drv|qca_nss_dp|qca_nss_ecm) ' /proc/modules 2>/dev/null |
 fi
 
 # --- debugfs ---------------------------------------------------------------
+# The qca-ppe driver creates its debugfs dir as the *platform device* name,
+# /sys/kernel/debug/<addr>.ppe (measured: 3a000000.ppe on IPQ60xx), not a tidy
+# "ppe". Match either form so an upstream rename does not silently disable the
+# backend detection.
 [ -d /sys/kernel/debug/ppe ] && ppe_dbg=1
+for d in /sys/kernel/debug/*.ppe; do
+	[ -d "$d" ] && ppe_dbg=1
+done
 [ -d /sys/kernel/debug/ecm ] && ecm_dbg=1
 
 # --- netdev drivers --------------------------------------------------------
@@ -46,20 +61,31 @@ fi
 for dev in /sys/class/net/*; do
 	[ -e "$dev/device/driver" ] || continue
 	drv=$(basename "$(readlink -f "$dev/device/driver" 2>/dev/null)" 2>/dev/null)
+	# qca-ppe / qcom-ppe are the *modern* upstream switch+PPE driver; they must
+	# NOT be treated as the NSS data path. This case used to set nss_dev=1, so
+	# a pure qcom-ppe board (IPQ60xx here) was reported as nss-ecm and the
+	# caller recommended ppe_mode=fallback -- exactly the wrong advice, since
+	# there is no NSS firmware on this box to fall back from.
 	case "$drv" in
-	qca-ppe|qcom-ppe|qca_edma)
-		nss_dev=1
+	qca-ppe|qcom-ppe)
+		ppe_dev=1
 		;;
 	nss-dp|qca-nss-dp|qca-nss)
 		nss_dev=1
+		;;
+	qca_edma|qcom_edma)
+		edma_dev=1
 		;;
 	esac
 done
 
 # --- decide ----------------------------------------------------------------
+# NSS is chosen only on real NSS evidence (module, ECM debugfs, or the NSS
+# netdev driver). The modern qcom-ppe driver is its own backend and can carry
+# L3 offload (active_flows / offload counters under its debugfs dir).
 if [ "$nss_mod" = 1 ] || [ "$ecm_dbg" = 1 ] || [ "$nss_dev" = 1 ]; then
 	backend=nss-ecm
-elif [ "$ppe_mod" = 1 ] || [ "$ppe_dbg" = 1 ]; then
+elif [ "$ppe_mod" = 1 ] || [ "$ppe_dbg" = 1 ] || [ "$ppe_dev" = 1 ]; then
 	backend=qcom-ppe
 fi
 
@@ -68,7 +94,9 @@ say qcom_ppe_module "$ppe_mod"
 say qcom_ppe_debugfs "$ppe_dbg"
 say nss_modules "$nss_mod"
 say ecm_debugfs "$ecm_dbg"
+say qcom_ppe_netdev "$ppe_dev"
 say nss_netdev "$nss_dev"
+say edma_netdev "$edma_dev"
 command -v nssinfo >/dev/null 2>&1 && say nssinfo yes || say nssinfo no
 
 # --- conntrack offload state ----------------------------------------------
