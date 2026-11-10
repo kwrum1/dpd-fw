@@ -49,21 +49,40 @@ static uint64_t flow_age_ms(uint32_t last_seen_ms)
 	return age > 0 ? (uint64_t)age : 0;
 }
 
-static const char *pin_path(const char *name)
-{
-	static char buf[128];
+/* Where the object's maps can end up, in order of preference.
+ *
+ * `LIBBPF_PIN_BY_NAME` pins relative to whatever bpffs directory the *loader*
+ * chose, which depends on how it was loaded:
+ *   - tc(8) loads under /sys/fs/bpf/tc/globals/<name>. This is the normal
+ *     production path on OpenWrt, and it was the one dpdctl could not see: on
+ *     the IPQ60xx (2026-11-11) `dpdctl abi` printed 0 while the maps were
+ *     plainly present in /sys/fs/bpf/tc/globals/, so every command silently
+ *     fell back to the map-id scan;
+ *   - a future loader that pins at the bpffs root gives /sys/fs/bpf/<name>.
+ * Both are tried. The id scan in map_open() stays as the last resort, but it
+ * is a *heuristic* (it matches the first map with that BTF name), so the
+ * pinned path must be tried first and must be correct.
+ */
+static const char *pin_dirs[] = {
+	"/sys/fs/bpf/tc/globals",
+	DPD_PIN_DIR,
+};
 
-	snprintf(buf, sizeof(buf), "%s/%s", DPD_PIN_DIR, name);
-	return buf;
-}
-
-/* Open a map: try the pin first, then scan map ids for a matching BTF name. */
+/* Open a map: try each pin location, then scan map ids for a matching BTF
+ * name. */
 static int map_open(const char *name)
 {
-	int fd = dpd_bpf_obj_get(pin_path(name));
+	int fd;
+	size_t i;
 
-	if (fd >= 0)
-		return fd;
+	for (i = 0; i < sizeof(pin_dirs) / sizeof(pin_dirs[0]); i++) {
+		char path[160];
+
+		snprintf(path, sizeof(path), "%s/%s", pin_dirs[i], name);
+		fd = dpd_bpf_obj_get(path);
+		if (fd >= 0)
+			return fd;
+	}
 
 	for (uint32_t id = 0;;) {
 		struct bpf_map_info info = {};
