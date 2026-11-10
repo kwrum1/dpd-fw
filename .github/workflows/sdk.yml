@@ -174,6 +174,48 @@ jobs:
           # here; the package build itself fails if dpd_fastpath.bpf.o or
           # dpdctl were missing from the install list.
 
+      # The apk is what actually ships, and until now nothing ever looked
+      # inside it: a build that silently packaged a stale object would still be
+      # green. These checks read the *staged install tree* the package was
+      # built from, i.e. exactly the file list that went into the apk.
+      - name: Assert the packaged ABI matches the source
+        run: |
+          set -euo pipefail
+          want=$(grep -oP '^#define DPD_ABI_VERSION\s+\K[0-9]+' \
+                 fw/ebpf/router-dataplane/src/dpd_common.h)
+          echo "source declares ABI=$want"
+
+          stamp=$(find sdk/staging_dir sdk/build_dir -path '*/usr/lib/dpd/abi' \
+                  2>/dev/null | head -1 || true)
+          if [ -z "$stamp" ]; then
+            echo "!! /usr/lib/dpd/abi was not installed into the package" >&2
+            echo "!! the init script needs it to decide whether to drop pinned maps" >&2
+            exit 1
+          fi
+          got=$(tr -d '[:space:]' < "$stamp")
+          echo "packaged ABI=$got (from $stamp)"
+
+          if [ "$got" != "$want" ]; then
+            echo "!! packaged ABI ($got) != source ABI ($want)" >&2
+            echo "!! the apk would install an object the userspace does not match" >&2
+            exit 1
+          fi
+
+          # The object and the control binary must both be present, and the
+          # object must have the sections the attach script asks for.
+          obj=$(find sdk/staging_dir sdk/build_dir -name 'dpd_fastpath.bpf.o' \
+                2>/dev/null | head -1 || true)
+          [ -n "$obj" ] || { echo "!! dpd_fastpath.bpf.o not installed" >&2; exit 1; }
+          echo "bpf.o: $obj ($(stat -c %s "$obj") bytes)"
+          readelf -S "$obj" | grep -q 'classifier/l2' \
+            || { echo "!! classifier/l2 section missing from the object" >&2; exit 1; }
+          readelf -S "$obj" | grep -q 'classifier/egress' \
+            || { echo "!! classifier/egress section missing from the object" >&2; exit 1; }
+
+          find sdk/staging_dir -name 'dpdctl' -type f | head -1 | grep -q . \
+            || { echo "!! dpdctl not installed" >&2; exit 1; }
+          echo "packaged datapath: ok (abi=$got, sections present)"
+
       - name: Upload apks
         uses: actions/upload-artifact@v4
         with:
