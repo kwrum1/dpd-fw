@@ -516,3 +516,87 @@ router itself
 数据面仍然挂着、计数仍然可读、PPE 表仍然显示，只是不会有人被加速。等
 WAN 起来（或插上上行），`90-dpd-fastpath` 的 ifup 事件会重新评估 gate，
 不需要人工干预。
+
+
+## 11. 构建产物核对（2026-11-11 晚）
+
+验收项不能只看设备上的手工部署：镜像里必须确实带着这些改动。这一节记录
+从"源码在 dpd-fw"到"镜像可核对"的闭环。
+
+### 11.1 源码只有一份
+
+固件仓库不再保存 dpd 源码副本。`main` 是唯一源码树，`arm` 是打包快照
+（`packaging/router-dataplane/{src,files}`、`packaging/dpdfwd/{src,files}`），
+由 `packaging/sync.sh` 生成。固件构建前执行 `Scripts/Fetch-DPD.sh`，日志会打印
+解析到的 commit。
+
+原因很直接：`09487cb` 里的 vendored `dpdctl.c` 还是 ABI 22 之前的版本，
+镜像会缺 `hooked` / `iface_count` / `ppe_hw`，而设备上跑的是新二进制。
+把源码留在 CI 里就一定会再次漂移。
+
+### 11.2 sdk：包构建先验证
+
+dpd-fw 的 sdk workflow（固件 `7e510ca`、dpd-fw `0c31afb`）：
+
+```
+fetch-dpd: https://github.com/kwrum1/dpd-fw.git arm @ 1cd3695...
+ok: dpdfwd
+ok: dpd-fastpath
+```
+
+两个架构的 apk 重新生成；aarch64 的 `dpdctl` 仍含
+`iface_count` / `hooked` / `active_flows` / `ppe_hw`。
+
+### 11.3 镜像
+
+`0fd81e9` 上的 QCA-PPE 与 EBPF-WRT-ALL 均成功：
+
+```
+QCA-PPE       success  18:03 (本地)
+EBPF-WRT-ALL  success  18:22 (本地)
+```
+
+X86 release `dpd-fw-wrt-X86-26.11.11-17.41.26`，provenance：
+
+```
+built_at      2026-11-11T09:59:00Z
+ebpf_abi      22
+ebpf_src_tree sha256=5fed59c45412c8d5cc05c20e057a4b05685d7e28097361d90bc0445a49fc0437
+manifest      dpd-fastpath 0.1.0-r11 / dpdfwd 0.1.0-r10 / einat-ebpf 0.1.11-r3
+```
+
+从该镜像的 rootfs 取出并核对：
+
+```
+usr/sbin/dpdctl   44667 bytes   iface_count ✓ hooked ✓ active_flows ✓ ppe_hw ✓
+usr/sbin/dpdfwd   36923 bytes   /var/run/ebpf/status.json ✓  status -j ✓
+etc/init.d/dpd-fastpath 8037 B  dpd_push_ppe ✓
+usr/lib/dpd/abi   22
+www/.../view/vantage/overview.js   ppe_hw ✓ status.json ✓ vt-dpd-row ✓ vt-dpd-val ✓
+www/.../vantage/app.css            ebpf-ppe-chip ✓ grid-auto-flow:column ✓ vt-dpd-key ✓
+```
+
+ROCKCHIP release `dpd-fw-wrt-ROCKCHIP-26.11.11-17.41.16` 的 provenance
+`built_at 2026-11-11T10:21:26Z`，同一 `ebpf_src_tree`，同 ABI 22。
+
+### 11.4 一个上游阻塞及处理
+
+所有镜像一度倒在 firewall4：
+
+```
+Hash mismatch for firewall4-2026.11.08~3722eadc.tar.zst:
+  expected 70cbaec5...  got a95c6cfe...
+```
+
+源码 commit 仍钉在 `3722eadc`，只是运行器重新生成的归档字节变了。按
+"commit 才是内容保证、wrapper 哈希只校验打包"处理：`Scripts/Packages.sh`
+在哈希仍是旧值时替换为实测值，并打印一行日志；上游若改成别的值，grep 不
+命中，构建会失败而不是静默放行。上游修正后可删掉该块。
+
+### 11.5 结论
+
+- 软件 fastpath / flowtable / ABI 22 yield：设备实测通过（§10.6）。
+- PPE 硬件表：概况页与驱动原始行一致（§10.5）。
+- 构建产物：X86 与 ROCKCHIP 镜像成功，rootfs 内的 dpdctl/dpdfwd/init/UI
+  均含本次改动，manifest 与 provenance 可核对。
+- 硬件 L3 转发卸载仍按 §7 的范围排除。
