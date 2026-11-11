@@ -1833,15 +1833,28 @@ static int map_count(int fd, uint32_t key_size)
 /* dpd_flows occupancy, split by address family: the status card shows the
  * active flow count as "v4 / v6" and the family is part of the key, so one
  * walk gives both the total and the split. */
-static void flow_count(uint32_t *max_entries, int *total, int *v4, int *v6)
+/*
+ * Count the flow table, optionally breaking it down by hardware state.
+ *
+ * ppe may be NULL. When it is not, ppe[0..DPD_PPE_DENIED] receives one count
+ * per enum dpd_ppe_state, which is what the dashboard's "hardware: N flows"
+ * line is built from. Reading the value costs one extra lookup per entry; the
+ * only caller that asks for it is the status page, never the packet path.
+ */
+static void flow_count(uint32_t *max_entries, int *total, int *v4, int *v6,
+		       int *ppe)
 {
 	unsigned char key[64], next[64];
 	struct bpf_map_info info = {};
 	uint32_t len = sizeof(info);
 	int fd = map_open("dpd_flows");
+	int i;
 
 	*max_entries = 0;
 	*total = *v4 = *v6 = -1;
+	if (ppe)
+		for (i = 0; i <= DPD_PPE_DENIED; i++)
+			ppe[i] = 0;
 	if (fd < 0)
 		return;
 	if (dpd_bpf_map_get_info_by_fd(fd, &info, &len)) {
@@ -1852,6 +1865,7 @@ static void flow_count(uint32_t *max_entries, int *total, int *v4, int *v6)
 	*total = *v4 = *v6 = 0;
 	if (info.key_size != sizeof(struct dpd_flow_key) ||
 	    info.key_size > sizeof(key) ||
+	    info.value_size != sizeof(struct dpd_flow_val) ||
 	    dpd_bpf_map_get_next_key(fd, NULL, key))
 		goto out;
 	for (;;) {
@@ -1862,6 +1876,13 @@ static void flow_count(uint32_t *max_entries, int *total, int *v4, int *v6)
 			(*v4)++;
 		else if (k->family == AF_INET6)
 			(*v6)++;
+		if (ppe) {
+			struct dpd_flow_val v = {};
+
+			if (!dpd_bpf_map_lookup_elem(fd, key, &v) &&
+			    v.ct_cookie <= DPD_PPE_DENIED)
+				ppe[v.ct_cookie]++;
+		}
 		if (dpd_bpf_map_get_next_key(fd, key, next))
 			break;
 		memcpy(key, next, info.key_size);
@@ -1990,9 +2011,24 @@ static int status_json(void)
 	}
 
 	printf("  \"maps\": {\n");
-	flow_count(&max, &cnt, &f4, &f6);
-	printf("    \"flows\": { \"max_entries\": %u, \"entries\": %d, "
-	       "\"v4\": %d, \"v6\": %d },\n", max, cnt, f4, f6);
+	{
+		int ppe[6];
+
+		flow_count(&max, &cnt, &f4, &f6, ppe);
+		printf("    \"flows\": { \"max_entries\": %u, \"entries\": %d, "
+		       "\"v4\": %d, \"v6\": %d },\n", max, cnt, f4, f6);
+		/* ABI 22: how many flows the hardware/flowtable owns versus how
+		 * many DPD still accelerates. This is what the dashboard shows
+		 * next to the software flow count. */
+		printf("    \"ppe\": { \"unknown\": %d, \"sw_active\": %d, "
+		       "\"yielded\": %d, \"offloaded\": %d, "
+		       "\"failed\": %d, \"denied\": %d, "
+		       "\"yielded_total\": %d },\n",
+		       ppe[DPD_PPE_UNKNOWN], ppe[DPD_PPE_SW_ACTIVE],
+		       ppe[DPD_PPE_YIELDED], ppe[DPD_PPE_OFFLOADED],
+		       ppe[DPD_PPE_FAILED], ppe[DPD_PPE_DENIED],
+		       ppe[DPD_PPE_YIELDED] + ppe[DPD_PPE_OFFLOADED]);
+	}
 	map_limits("dpd_iface", &max, &cnt);
 	printf("    \"iface\": { \"max_entries\": %u, \"entries\": %d },\n",
 	       max, cnt);
@@ -2173,7 +2209,7 @@ static int status_text(void)
 		printf("  gate          unknown (no %s yet)\n", DPD_GATE_TEXT);
 	}
 
-	flow_count(&max, &cnt, &f4, &f6);
+	flow_count(&max, &cnt, &f4, &f6, NULL);
 	printf("  flow cache    %d/%u (LRU, v4 %d, v6 %d)\n", cnt, max, f4, f6);
 	map_limits("dpd_mtu", &max, &cnt);
 	printf("  mtu table     %d/%u\n", cnt, max);
