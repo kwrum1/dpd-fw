@@ -535,6 +535,41 @@ static int cmd_bump(void)
  * IFF_POINTOPOINT|IFF_NOARP means there is no neighbour table and no L2 header
  * to rewrite, so AUTO must fall back to bpf_redirect().
  */
+/*
+ * Drop every flow whose ingress ifindex is gone.
+ *
+ * Deleting a device leaves both its dpd_iface entry and the flows learned on
+ * it. The iface entry is pruned in cmd_ifaces(); the flows were not, so after a
+ * test netns disappeared the map still counted them (dashboard: "2/16384" with
+ * nothing flowing) and, because the kernel reuses ifindexes, a later device
+ * could inherit an entry keyed to it. One walk per pruned index is cheap: this
+ * runs only when an interface is deleted, not per packet.
+ */
+static void flows_drop_ifindex(uint32_t ifindex)
+{
+	struct dpd_flow_key k;
+	int fd = map_open("dpd_flows");
+
+	if (fd < 0)
+		return;
+	if (dpd_bpf_map_get_next_key(fd, NULL, &k)) {
+		close(fd);
+		return;
+	}
+	for (;;) {
+		struct dpd_flow_key nk;
+		int have_next = !dpd_bpf_map_get_next_key(fd, &k, &nk);
+
+		/* next key first: deleting k may invalidate the cursor */
+		if (k.ifindex == ifindex)
+			dpd_bpf_map_delete_elem(fd, &k);
+		if (!have_next)
+			break;
+		k = nk;
+	}
+	close(fd);
+}
+
 static int cmd_ifaces(int argc, char **argv)
 {
 	int fd, mfd;
@@ -555,6 +590,41 @@ static int cmd_ifaces(int argc, char **argv)
 			"dpdctl: no dpd_mtu map (object older than ABI 11); "
 			"MSS clamp will stay inactive\n");
 		mfd = -1;
+	}
+
+	/*
+	 * Stale keys. An interface that is deleted keeps its old ifindex in the
+	 * map, and the kernel *reuses* ifindex numbers: a veth removed after a
+	 * test can hand its index to a later device, which then inherits flags
+	 * and an MTU that were learned for something else. Seen on the IPQ60xx
+	 * (2026-11-11): the map still held if159/if161 long after the test
+	 * netns was gone. Drop every key that no longer resolves.
+	 */
+	{
+		uint32_t stale[64];
+		struct dpd_flow_key k, nk;
+		char name[IFNAMSIZ];
+		int n = 0;
+
+		if (!dpd_bpf_map_get_next_key(fd, NULL, &k)) {
+			for (;;) {
+				if (!if_indextoname(k.ifindex, name) &&
+				    n < (int)(sizeof(stale) / sizeof(stale[0])))
+					stale[n++] = k.ifindex;
+				if (dpd_bpf_map_get_next_key(fd, &k, &nk))
+					break;
+				k = nk;
+			}
+		}
+		for (int i = 0; i < n; i++) {
+			dpd_bpf_map_delete_elem(fd, &stale[i]);
+			if (mfd >= 0)
+				dpd_bpf_map_delete_elem(mfd, &stale[i]);
+			flows_drop_ifindex(stale[i]);
+		}
+		if (n)
+			printf("pruned %d stale iface entr%s\n", n,
+			       n == 1 ? "y" : "ies");
 	}
 
 	for (int i = 0; i < argc; i++) {
@@ -1986,6 +2056,82 @@ static int ppe_hw_read(int *v4, int *v6, int *used, int *max)
 	return 0;
 }
 
+/*
+ * Does this device really carry the fast path, or is it only loaded?
+ *
+ * `dpd_cfg` being pinned proves the object is loaded. It does not prove a tc
+ * filter is hooked: deleting a netns, recreating a bridge port or flushing a
+ * qdisc removes the filter while the pinned maps stay behind. On the IPQ60xx
+ * (2026-11-11) the status said "attached yes" with flow_hit frozen at 0 and no
+ * filter on any device -- the dashboard then showed acceleration as "on" for a
+ * datapath that saw no packets at all.
+ *
+ * Returns 1 hooked, 0 no filter, -1 tc could not be run (do not read that as
+ * "off": a box without iproute2 would look broken).
+ */
+static int tc_hooked(const char *dev)
+{
+	char cmd[160], line[256];
+	FILE *p;
+	int found = 0, rc;
+
+	snprintf(cmd, sizeof(cmd),
+		 "tc filter show dev %s ingress 2>/dev/null", dev);
+	p = popen(cmd, "r");
+	if (!p)
+		return -1;
+
+	while (fgets(line, sizeof(line), p))
+		if (strstr(line, "dpd_fastpath")) {
+			found = 1;
+			break;
+		}
+	rc = pclose(p);
+	if (rc == -1 || rc == 127 << 8)
+		return -1;
+	return found;
+}
+
+/*
+ * Count the configured interfaces that actually have a filter.
+ * *configured gets how many interfaces are in dpd_iface, *unknown is set when
+ * tc could not be consulted for at least one of them.
+ */
+static int iface_hooked(int *configured, int *unknown)
+{
+	struct dpd_flow_key k, nk;
+	int fd, hooked = 0;
+	char dev[IFNAMSIZ];
+
+	*configured = 0;
+	*unknown = 0;
+
+	fd = map_open("dpd_iface");
+	if (fd < 0)
+		return 0;
+	if (dpd_bpf_map_get_next_key(fd, NULL, &k)) {
+		close(fd);
+		return 0;
+	}
+	for (;;) {
+		if (if_indextoname(k.ifindex, dev)) {
+			int r;
+
+			(*configured)++;
+			r = tc_hooked(dev);
+			if (r > 0)
+				hooked++;
+			else if (r < 0)
+				*unknown = 1;
+		}
+		if (dpd_bpf_map_get_next_key(fd, &k, &nk))
+			break;
+		k = nk;
+	}
+	close(fd);
+	return hooked;
+}
+
 static int status_json(void)
 {
 	struct dpd_config cfg = {};
@@ -1998,11 +2144,14 @@ static int status_json(void)
 	int cnt, f4, f6, fd, first;
 	int have_cfg;
 	int have_wans = 0;
+	int hooked = 0, configured = 0, hook_unknown = 0;
 
 	fd = map_open("dpd_cfg");
 	have_cfg = fd >= 0 && cfg_read(fd, &cfg) == 0;
 	if (fd >= 0)
 		close(fd);
+	if (have_cfg)
+		hooked = iface_hooked(&configured, &hook_unknown);
 
 	/* read the uplink table once: both the maps block (entries) and the
 	 * wans array below report it. */
@@ -2017,7 +2166,15 @@ static int status_json(void)
 	printf("{\n");
 	printf("  \"tool\": \"dpdctl\",\n");
 	printf("  \"abi\": %u,\n", DPD_ABI_VERSION);
-	printf("  \"attached\": %s,\n", have_cfg ? "true" : "false");
+	/* loaded != attached: see tc_hooked(). A consumer that only needs
+	 * "is the object loaded" uses "loaded". */
+	printf("  \"attached\": %s,\n",
+	       have_cfg && hooked > 0 ? "true" : "false");
+	printf("  \"loaded\": %s,\n", have_cfg ? "true" : "false");
+	printf("  \"hooked\": %d,\n", hooked);
+	printf("  \"ifaces\": %d,\n", configured);
+	printf("  \"hook_unknown\": %s,\n",
+	       hook_unknown ? "true" : "false");
 	printf("  \"loaded_abi\": %u,\n", have_cfg ? cfg.abi_version : 0);
 
 	printf("  \"cfg\": ");
@@ -2214,15 +2371,34 @@ static int status_text(void)
 
 	printf("dpd status\n");
 	if (fd < 0 || cfg_read(fd, &cfg)) {
-		printf("  attached      no (no dpd_cfg pin; is the program loaded?)\n");
+		printf("  loaded        no (no dpd_cfg pin; the program is not "
+		       "loaded, so nothing can be attached)\n");
 		if (fd >= 0)
 			close(fd);
 		return 0;
 	}
 	close(fd);
 
-	printf("  attached      yes (ABI %u loaded, %u built)\n",
-	       cfg.abi_version, DPD_ABI_VERSION);
+	{
+		int configured = 0, unknown = 0;
+		int hooked = iface_hooked(&configured, &unknown);
+
+		if (hooked > 0)
+			printf("  attached      yes (ABI %u loaded, %u built; "
+			       "tc hook on %d/%d iface%s)\n",
+			       cfg.abi_version, DPD_ABI_VERSION, hooked,
+			       configured, configured == 1 ? "" : "s");
+		else if (unknown)
+			printf("  attached      unknown (ABI %u loaded; tc "
+			       "unavailable, cannot confirm the hook)\n",
+			       cfg.abi_version);
+		else
+			printf("  attached      no (ABI %u loaded, but no tc "
+			       "filter on %d configured iface%s; nothing "
+			       "reaches the fast path)\n",
+			       cfg.abi_version, configured,
+			       configured == 1 ? "" : "s");
+	}
 	printf("  mode          %s (effective; the requested mode is in the gate)\n",
 	       mode_name(cfg.mode));
 	printf("  enable        %u\n", cfg.enable);

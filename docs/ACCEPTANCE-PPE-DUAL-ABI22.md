@@ -367,3 +367,151 @@ dpdctl set enable 1
 dpdctl flows ppe offloaded
 dpdctl stats | grep -E 'ppe_|flow_hit'
 ```
+
+
+## 10. 实装：开机路径、诚实状态与概况页（2026-11-11）
+
+这一节记录的是"把已验证的数据面装进一台真实路由器"时补掉的三处缺口，
+以及概况页最终呈现的样子。设备：太乙 `10.10.10.100`，IPQ60xx，
+ImmortalWRT SNAPSHOT，只接了 LAN 口，WAN 无载波、无默认路由。
+
+### 10.1 服务化
+
+手工部署的 `dpdctl` / `dpdfwd` / `dpd_fastpath.bpf.o` 之外，还装了：
+
+```
+/etc/init.d/dpd-fastpath          S95
+/etc/init.d/dpdfwd                S96
+/usr/libexec/dpd-fastpath.sh
+/usr/libexec/dpd-gate-watchdog
+/usr/libexec/dpd-gate-refresh
+/etc/hotplug.d/iface/90-dpd-fastpath
+/etc/sysctl.d/99-ebpf-accel.conf
+/etc/config/dpd_fastpath
+```
+
+`option interfaces 'lan'` 解析成 `br-lan`，并按既有设计同时挂到它的每个
+bridge port（`lan1`/`lan2`/`lan3`）。实测：
+
+```
+attached      yes (ABI 22 loaded, 22 built; tc hook on 4/4 ifaces)
+br-lan 1   lan1 1   lan2 1   lan3 1   wan 0
+```
+
+`wan` 保持 0 是设计约束：上行 hook 只在 `option downlink '1'` 且
+`mode=stateful` 时才有意义。
+
+### 10.2 "attached" 不再等于"已加载"
+
+旧实现里 `dpdctl status` 的 `attached` 只检查 pinned `dpd_cfg` 是否存在，
+也就是"程序加载过"。它在下面这种情况下会撒谎：测试用的 netns 删除后，
+tc filter 随设备消失，但 pinned map 还在，于是状态报 `attached yes`，
+而 `flow_hit` 一直冻结在 0、任何设备上都没有 filter。概况页会据此显示
+"on"，操作者却找不到任何被加速的包。
+
+现在 `status -j` 明确拆成四个字段：
+
+```
+"attached": true|false      = loaded && hooked > 0
+"loaded":   true|false      = dpd_cfg 存在
+"hooked":   N               = 真正带 dpd_fastpath filter 的接口数
+"ifaces":   N               = 配置里仍存在的接口数
+"hook_unknown": true|false  = 没有 tc，无法判断（不把"不知道"当成"关"）
+```
+
+文本输出也直接给出可行动的信息：
+
+```
+attached      no (ABI 22 loaded, but no tc filter on 4 configured ifaces;
+                  nothing reaches the fast path)
+```
+
+`hooked` 由 `tc filter show dev <if> ingress` 得到，只对 `dpd_iface` 里的
+接口采样；TC 不存在时返回 `hook_unknown`，避免在没有 iproute2 的镜像上
+把正常的 datapath 报成关闭。
+
+概况页的 chip 因此改为 `attached && hooked` 才算"加速中"；仅加载时显示
+模式名（如 `observe`），未加载时显示 `—` 并给出"加速引擎未启动"。
+
+### 10.3 陈旧的接口键与流
+
+接口被删除后，`dpd_iface` / `dpd_mtu` 里的旧 ifindex 不会自己消失，而内核
+会复用 ifindex。实测在测试 netns 删除很久之后，map 里仍留着 `if159` /
+`if161`。这既让概况页多显示不存在的接口，也可能让后来的设备继承别人的
+flags/MTU。
+
+`dpdctl ifaces ...` 现在先删除所有无法解析的 ifindex，再学习新接口；同时
+删掉 `ingress_ifindex` 等于该值的 `dpd_flows` 条目，避免"2/16384 但一个包
+也没在走"的假读数，以及 ifindex 复用后误命中旧流。实测清理后只剩
+`br-lan` / `lan1` / `lan2` / `lan3`。
+
+### 10.4 ppe_mode 在开机路径下发
+
+`ppe_mode` / `ppe_grace_ms` 原先只在 gate watchdog 的第一轮（最多 20 秒后）
+写入内核。开机后的这段时间里，无论 uci 写的是什么，内核里都还是 map 里
+遗留的值（默认 0 = off）。
+
+现在 `dpd_push_ppe()` 是唯一映射点（uci 的 `dual`/`fallback` 都写成
+`DPD_PPE_FALLBACK`），`start_service()` 和 `dpd_gate_refresh_uci()` 共用。
+实测用三个不同的值重启验证：
+
+```
+ppe_mode=yield      -> ppe_mode yield (hardware coexistence)
+ppe_mode=fallback   -> ppe_mode fallback, ppe_grace 1500 ms
+ppe_grace=0         -> ppe_grace 0 ms (take over at once)
+```
+
+### 10.5 概况页
+
+两张流表分两行显示，格式与项目里的计数器一致：
+
+```
+observe · DPD: 0/16384 (IPv4: 0 IPv6: 0) · PPE: 0/2048 (IPv4: 0 IPv6: 0)
+```
+
+* `DPD` 是 eBPF fastpath 自己的流表（`maps.flows`）。
+* `PPE` 是硬件 L3 卸载表，读 `/sys/kernel/debug/3a000000.ppe/active_flows`
+  的第一行 `<ipv4> <ipv6> <used>/<max>`，实测为 `0 0 0/2048`；MTK PPE 的
+  同样格式也可以直接读。
+* 两者从不相加：一个是软件接管的流，一个是硬件接管的流，相加会把软件
+  加速说成硬件加速。
+* 没有 PPE 的机器（x86/RK）`ppe_hw.present=false`，这一行整体不显示，
+  而不是显示一个假的 `0/0`。
+
+数据由 `dpdfwd` 每 2 秒写 `/var/run/ebpf/status.json`（临时文件 + rename），
+LuCI 通过 rpcd 的 file ACL 读取；ACL 同时授权 `/var/run/...` 和
+`/tmp/run/...` 两种写法（`/var/run` 是符号链接）。
+
+### 10.6 软件路径实测（受控路由流量）
+
+因为本机只有 LAN、没有可路由的上行，真实 LAN 流量是二层交换，不经过
+DPD 的转发判定；用两个 netns + veth 构造一条真实经过本机内核转发的流：
+
+```
+iperf3          5430 Mbits/sec (sender), 5423 Mbits/sec (receiver)
+flow_hit        0 -> 90519
+flows           entries 2 (v4 2, v6 0) / 16384
+6 秒后          仍是 entries 2，未被 sweep 误删
+ppe             unknown 2（无硬件 L3 卸载，符合本驱动能力）
+```
+
+这条证据补上了此前只验证"吞吐 + 流表条目"、没有单独记录 `flow_hit` 的
+空白。
+
+### 10.7 本机拓扑下的正确行为
+
+装好服务后 gate 的原文是：
+
+```
+stateful
+observe
+no-uplink
+no uplink (no WAN device or no default route), so there is no forwarding path
+to accelerate and hooking the LAN would only steal traffic addressed to the
+router itself
+```
+
+也就是说：**只有 LAN 口、没有上行时，DPD 应当停在 observe**，而不是报错。
+数据面仍然挂着、计数仍然可读、PPE 表仍然显示，只是不会有人被加速。等
+WAN 起来（或插上上行），`90-dpd-fastpath` 的 ifup 事件会重新评估 gate，
+不需要人工干预。
