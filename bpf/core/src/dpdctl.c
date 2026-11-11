@@ -2172,7 +2172,7 @@ static int status_json(void)
 	       have_cfg && hooked > 0 ? "true" : "false");
 	printf("  \"loaded\": %s,\n", have_cfg ? "true" : "false");
 	printf("  \"hooked\": %d,\n", hooked);
-	printf("  \"ifaces\": %d,\n", configured);
+	printf("  \"iface_count\": %d,\n", configured);
 	printf("  \"hook_unknown\": %s,\n",
 	       hook_unknown ? "true" : "false");
 	printf("  \"loaded_abi\": %u,\n", have_cfg ? cfg.abi_version : 0);

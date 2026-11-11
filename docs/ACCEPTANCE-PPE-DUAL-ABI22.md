@@ -415,7 +415,8 @@ tc filter 随设备消失，但 pinned map 还在，于是状态报 `attached ye
 "attached": true|false      = loaded && hooked > 0
 "loaded":   true|false      = dpd_cfg 存在
 "hooked":   N               = 真正带 dpd_fastpath filter 的接口数
-"ifaces":   N               = 配置里仍存在的接口数
+"iface_count": N            = 配置里仍存在的接口数（不叫 ifaces：JSON 里
+                              另有一个 ifaces 数组，重名时解析器取值不一致）
 "hook_unknown": true|false  = 没有 tc，无法判断（不把"不知道"当成"关"）
 ```
 
