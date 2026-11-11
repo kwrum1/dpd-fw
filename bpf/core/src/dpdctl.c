@@ -1948,6 +1948,44 @@ static void json_iface_flags(uint32_t v)
 	putchar('"');
 }
 
+/*
+ * Hardware flow-table occupancy, as the PPE driver reports it.
+ *
+ * The qca-ppe (and MTK PPE) debugfs exposes one line:
+ *     <ipv4> <ipv6> <used>/<max>
+ * e.g. "0 0 0/2048". That is the L3 offload table, i.e. the flows the *hardware*
+ * is forwarding -- a different thing from dpd_flows (what DPD accelerates) and
+ * from conntrack's IPS_OFFLOAD (what the software flowtable owns). The
+ * dashboard shows all three separately so none of them can be mistaken for
+ * another.
+ *
+ * Returns 1 when a PPE table was found, 0 when this box has none (x86/RK).
+ */
+static int ppe_hw_read(int *v4, int *v6, int *used, int *max)
+{
+	static const char *paths[] = {
+		"/sys/kernel/debug/3a000000.ppe/active_flows",
+		"/sys/kernel/debug/ppe0/active_flows",
+	};
+	size_t i;
+	char buf[128];
+	FILE *f;
+
+	*v4 = *v6 = *used = *max = 0;
+	for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		f = fopen(paths[i], "r");
+		if (!f)
+			continue;
+		if (fgets(buf, sizeof(buf), f) &&
+		    sscanf(buf, "%d %d %d/%d", v4, v6, used, max) == 4) {
+			fclose(f);
+			return 1;
+		}
+		fclose(f);
+	}
+	return 0;
+}
+
 static int status_json(void)
 {
 	struct dpd_config cfg = {};
@@ -2028,6 +2066,16 @@ static int status_json(void)
 		       ppe[DPD_PPE_YIELDED], ppe[DPD_PPE_OFFLOADED],
 		       ppe[DPD_PPE_FAILED], ppe[DPD_PPE_DENIED],
 		       ppe[DPD_PPE_YIELDED] + ppe[DPD_PPE_OFFLOADED]);
+	}
+	/* The hardware table itself. present=false means this box has no PPE,
+	 * so the dashboard can hide the line instead of showing a fake 0/0. */
+	{
+		int hv4 = 0, hv6 = 0, hused = 0, hmax = 0;
+		int have = ppe_hw_read(&hv4, &hv6, &hused, &hmax);
+
+		printf("    \"ppe_hw\": { \"present\": %s, \"used\": %d, "
+		       "\"max\": %d, \"v4\": %d, \"v6\": %d },\n",
+		       have ? "true" : "false", hused, hmax, hv4, hv6);
 	}
 	map_limits("dpd_iface", &max, &cnt);
 	printf("    \"iface\": { \"max_entries\": %u, \"entries\": %d },\n",
