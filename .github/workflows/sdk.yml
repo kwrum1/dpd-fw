@@ -74,6 +74,12 @@ jobs:
           path: fw
           fetch-depth: 1
 
+      # The firmware tree keeps only the Makefiles; the sources come from this
+      # repository's arm branch. DPD_REF defaults to arm, pin it for a release.
+      - name: Fetch DPD dataplane sources
+        working-directory: fw
+        run: sh Scripts/Fetch-DPD.sh
+
       - name: Install host tools
         run: |
           sudo apt-get -yqq update
