@@ -1,0 +1,16 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# First boot on a box that exposes a hardware PPE table: give the hardware the
+# first refusal and take back only the flows it failed or denied (ABI 22
+# 'fallback', the "dual acceleration" mode). x86/RK have no PPE node and keep
+# the shipped 'off'.
+#
+# This runs from /etc/uci-defaults, i.e. once per config partition, so an
+# operator who later chooses 'yield' or 'off' is not overridden.
+[ -d /sys/kernel/debug/3a000000.ppe ] || [ -d /sys/kernel/debug/ppe0 ] || exit 0
+[ -f /etc/config/dpd_fastpath ] || exit 0
+
+uci -q set dpd_fastpath.global.ppe_mode='fallback'
+uci -q commit dpd_fastpath
+exit 0
