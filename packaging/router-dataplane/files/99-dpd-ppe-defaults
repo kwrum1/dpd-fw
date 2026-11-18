@@ -1,0 +1,38 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# First boot on a box that exposes a hardware PPE table (IPQ60xx/IPQ807x).
+#
+# Hardware first: the PPE L3 offload is the primary engine. It is the fastest
+# path on this silicon, so fw4's flow offloading (software + hardware) stays on
+# and conntrack/fw4 own NAT.
+#
+# einat must stay out: its conntrack-free NAT is executed in TCX, which the
+# hardware offload bypasses. With both active, RustDesk's flows went
+# [HW_OFFLOAD] and every TCP control connection stalled in LAST_ACK (measured
+# 2026-11-15). Disabling einat lets PPE offload correctly; DPD then observes
+# (the gate reports no-einat) and the dashboard shows the real PPE occupancy.
+#
+# Flows the hardware cannot offload are forwarded by the kernel stack, which is
+# the correct software fallback. DPD does not take them over because an
+# accelerated packet skips netfilter and would have to re-NAT the flow, which
+# changes its external port mid-connection.
+#
+# x86/RK have no PPE node; they keep einat + DPD + normal offloading.
+[ -d /sys/kernel/debug/3a000000.ppe ] || [ -d /sys/kernel/debug/ppe0 ] || exit 0
+
+uci -q set dpd_fastpath.global.ppe_mode='fallback'
+uci -q commit dpd_fastpath
+
+[ -f /etc/config/einat ] && {
+	uci -q set einat.config.enabled='0'
+	uci -q commit einat
+}
+
+uci -q set firewall.@defaults[0].flow_offloading='1'
+uci -q set firewall.@defaults[0].flow_offloading_hw='1'
+zone=$(uci -q show firewall 2>/dev/null |
+	sed -n "s/^firewall\.\([^.]*\)\.name='wan'$/\1/p" | head -1)
+[ -n "$zone" ] && uci -q set "firewall.$zone.masq='1'"
+uci -q commit firewall
+exit 0
