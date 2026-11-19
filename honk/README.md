@@ -33,8 +33,13 @@ IPQ/MTK images use the stock upstream package and core.
 
 ## Bumping
 
-1. Bump `CORE_COMMIT` in `pins.env`.
+1. Bump `CORE_COMMIT` in `pins.env`, and the same commit in the firmware's
+   `patches/honk/apply-makefile.sh` (`CORE=`), because that is what the image
+   writes into the package Makefile.
 2. Run `python3 honk/patches/honk-direct-unspec.py <honk tree>` locally; it
-   fails loudly if the anchors moved.
-3. Push: `honk-core` rebuilds and republishes `core-p1`.
-4. The firmware needs no change (fixed tag, asset names carry the commit).
+   fails loudly if the anchors moved. `honk-core-config-validate.patch` is
+   applied first and must apply unchanged.
+3. Push: `honk-core` rebuilds and republishes `core-p1` (assets carry the new
+   commit, `generated-stage.mk` and the provenance file are replaced).
+4. The firmware needs no further change: it reads `generated-stage.mk` from the
+   fixed tag and the asset names carry the commit.
